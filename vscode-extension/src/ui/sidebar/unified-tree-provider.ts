@@ -376,6 +376,8 @@ export class WorktreeItem extends vscode.TreeItem {
             const parts: string[] = ["default"];
             const changes = this.getChangeSummary();
             if (changes) parts.push(changes);
+            const sync = this.getSyncSummary();
+            if (sync) parts.push(sync);
             return parts.join(" \u00b7 ");
         }
 
@@ -394,6 +396,9 @@ export class WorktreeItem extends vscode.TreeItem {
             parts.push("clean");
         }
 
+        const sync = this.getSyncSummary();
+        if (sync) parts.push(sync);
+
         return parts.join(" \u00b7 ");
     }
 
@@ -404,6 +409,14 @@ export class WorktreeItem extends vscode.TreeItem {
         if (staged > 0) parts.push(`+${staged}`);
         if (modified > 0) parts.push(`~${modified}`);
         if (untracked > 0) parts.push(`?${untracked}`);
+        return parts.join(" ");
+    }
+
+    private getSyncSummary(): string {
+        const { ahead, behind } = this.worktree;
+        const parts: string[] = [];
+        if (behind > 0) parts.push(`\u2193${behind}`);
+        if (ahead > 0) parts.push(`\u2191${ahead}`);
         return parts.join(" ");
     }
 
@@ -457,9 +470,20 @@ export class WorktreeItem extends vscode.TreeItem {
             );
         }
 
+        // Show ahead/behind info
+        const { ahead, behind } = this.worktree;
+        if (ahead > 0 || behind > 0) {
+            md.appendMarkdown("**Remote sync:**\n\n");
+            if (behind > 0)
+                md.appendMarkdown(`- $(cloud-download) ${behind} commit(s) behind remote\n`);
+            if (ahead > 0)
+                md.appendMarkdown(`- $(cloud-upload) ${ahead} commit(s) ahead of remote\n`);
+            md.appendMarkdown("\n");
+        }
+
         md.appendMarkdown("---\n\n");
         md.appendMarkdown(
-            "$(rocket) Launch Claude \u00b7 $(terminal) Open Terminal \u00b7 $(multiple-windows) New Window"
+            "$(rocket) Launch Claude \u00b7 $(terminal) Open Terminal \u00b7 $(sync) Sync \u00b7 $(multiple-windows) New Window"
         );
 
         return md;

@@ -34,6 +34,10 @@ export interface WorktreeInfo {
     isBare: boolean;
     status: WorktreeStatus;
     statusSummary: string;
+    /** Commits ahead of the remote tracking branch. */
+    ahead: number;
+    /** Commits behind the remote tracking branch. */
+    behind: number;
 }
 
 export interface WorktreeStatus {
@@ -202,6 +206,8 @@ function finalizeWorktree(partial: Partial<WorktreeInfo>): WorktreeInfo {
         isBare: partial.isBare ?? false,
         status: { modified: 0, staged: 0, untracked: 0, conflicts: 0 },
         statusSummary: "",
+        ahead: 0,
+        behind: 0,
     };
 }
 
@@ -248,6 +254,57 @@ export async function getWorktreeStatus(
 }
 
 /**
+ * Get ahead/behind counts relative to the remote tracking branch.
+ * Returns { ahead: 0, behind: 0 } if no tracking branch is set.
+ */
+async function getAheadBehind(
+    worktreePath: string,
+    branch: string
+): Promise<{ ahead: number; behind: number }> {
+    try {
+        // Check if a remote tracking branch exists
+        const tracking = (
+            await git(
+                ["rev-parse", "--abbrev-ref", `${branch}@{upstream}`],
+                worktreePath
+            )
+        ).trim();
+        if (!tracking) return { ahead: 0, behind: 0 };
+
+        const output = (
+            await git(
+                ["rev-list", "--left-right", "--count", `${branch}...${tracking}`],
+                worktreePath
+            )
+        ).trim();
+        const [aheadStr, behindStr] = output.split(/\s+/);
+        return {
+            ahead: parseInt(aheadStr, 10) || 0,
+            behind: parseInt(behindStr, 10) || 0,
+        };
+    } catch {
+        // No tracking branch or other git error
+        return { ahead: 0, behind: 0 };
+    }
+}
+
+/**
+ * Fetch the latest remote refs for all worktrees.
+ * Uses `git fetch --all` so ahead/behind counts are up to date.
+ */
+export async function fetchRemote(repoRoot: string): Promise<void> {
+    await gitWrite(["fetch", "--all", "--prune"], repoRoot);
+}
+
+/**
+ * Pull remote changes into a specific worktree using rebase.
+ */
+export async function syncWorktree(worktreePath: string): Promise<string> {
+    const output = await gitWrite(["pull", "--rebase", "--autostash"], worktreePath);
+    return output;
+}
+
+/**
  * List all worktrees with status info populated.
  */
 export async function listAllWorktrees(
@@ -272,6 +329,11 @@ export async function listAllWorktrees(
                 wt.statusSummary =
                     changes.length > 0 ? changes.join(" ") : "clean";
             }
+
+            // Get ahead/behind from remote
+            const ab = await getAheadBehind(wt.path, wt.branch);
+            wt.ahead = ab.ahead;
+            wt.behind = ab.behind;
         } else {
             wt.statusSummary = "missing";
         }

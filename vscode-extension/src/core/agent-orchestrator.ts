@@ -29,6 +29,7 @@ import { loadProjectConfig } from "./config-manager";
 import { SessionTracker } from "./session-tracker";
 import { launchClaude } from "../utils/terminal";
 import { log, logError } from "../utils/logger";
+import { showAutoInfo } from "../ui/notifications";
 
 // ────────────────────────────────────────────
 // Types
@@ -178,7 +179,7 @@ export class AgentOrchestrator implements vscode.Disposable {
     ): Promise<TeamState | undefined> {
         // ── Launch guard ─────────────────────────────────────
         if (this._isLaunching) {
-            void vscode.window.showInformationMessage(
+            void showAutoInfo(
                 "A team is already being launched. Please wait."
             );
             return undefined;
@@ -489,7 +490,7 @@ export class AgentOrchestrator implements vscode.Disposable {
         this._onDidChangeTeams.fire();
         this.persistTeams();
 
-        void vscode.window.showInformationMessage(
+        void showAutoInfo(
             `Team launch cancelled. ${cleanedUp} worktree(s) cleaned up.`
         );
 
@@ -682,8 +683,8 @@ export class AgentOrchestrator implements vscode.Disposable {
                 return;
             }
             const env = (rawEnv ?? {}) as Record<string, string>;
-            if (env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS !== "true") {
-                env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "true";
+            if (env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS !== "1") {
+                env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
                 settings.env = env;
 
                 const dir = path.dirname(settingsPath);
@@ -694,7 +695,7 @@ export class AgentOrchestrator implements vscode.Disposable {
                     settingsPath,
                     JSON.stringify(settings, null, 2) + "\n"
                 );
-                log("Set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=true in ~/.claude/settings.json");
+                log("Set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in ~/.claude/settings.json");
             }
         } catch (err) {
             logError("Failed to set agent teams env var", err);

@@ -163,6 +163,12 @@
         "icon": "$(merge)"
       },
       {
+        "command": "grove.syncWorktree",
+        "title": "Sync from Remote",
+        "category": "Grove",
+        "icon": "$(cloud-download)"
+      },
+      {
         "command": "grove.quickMenu",
         "title": "Quick Menu",
         "category": "Grove",
@@ -235,9 +241,14 @@
           "group": "inline@1"
         },
         {
-          "command": "grove.openInTerminal",
+          "command": "grove.syncWorktree",
           "when": "viewItem == worktree || viewItem == worktree-main || viewItem == worktree-with-session",
           "group": "inline@2"
+        },
+        {
+          "command": "grove.openInTerminal",
+          "when": "viewItem == worktree || viewItem == worktree-main || viewItem == worktree-with-session",
+          "group": "inline@3"
         },
         {
           "command": "grove.openInNewWindow",
@@ -248,6 +259,11 @@
           "command": "grove.launchSession",
           "when": "viewItem == worktree || viewItem == worktree-main",
           "group": "1_open"
+        },
+        {
+          "command": "grove.syncWorktree",
+          "when": "viewItem == worktree || viewItem == worktree-main || viewItem == worktree-with-session",
+          "group": "2_inspect"
         },
         {
           "command": "grove.viewDiff",
@@ -311,6 +327,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "grove.syncWorktree",
+          "when": "false"
+        },
         {
           "command": "grove.openInTerminal",
           "when": "false"

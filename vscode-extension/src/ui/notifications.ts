@@ -59,3 +59,18 @@ export function showAutoWarning(
         ms
     );
 }
+
+/**
+ * Show an error notification that auto-dismisses after `ms` milliseconds.
+ * Defaults to 12 seconds (longer than info/warning since errors are more important).
+ */
+export function showAutoError(
+    message: string,
+    ms: number = 12_000,
+    ...actions: string[]
+): Thenable<string | undefined> {
+    return autoDismiss(
+        vscode.window.showErrorMessage(message, ...actions),
+        ms
+    );
+}

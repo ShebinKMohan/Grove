@@ -7,7 +7,7 @@
 
 import * as vscode from "vscode";
 import { getRepoRoot, getCurrentBranch, git, gitWrite, sanitizeRefName } from "./utils/git";
-import { showAutoInfo, showAutoWarning } from "./ui/notifications";
+import { showAutoInfo, showAutoWarning, showAutoError } from "./ui/notifications";
 import {
     UnifiedTreeProvider,
     CompletedTreeProvider,
@@ -28,6 +28,8 @@ import {
     removeWorktree,
     listAllWorktrees,
     validateBranchName,
+    fetchRemote,
+    syncWorktree,
 } from "./core/worktree-manager";
 import { openTerminal, openInNewWindow, launchClaude } from "./utils/terminal";
 import { DashboardPanel } from "./ui/webview/dashboard-panel";
@@ -272,11 +274,11 @@ export async function activate(
                 } catch (err) {
                     logError("Failed to create worktree", err);
                     if (err instanceof GroveError) {
-                        void vscode.window.showErrorMessage(
+                        void showAutoError(
                             `${err.message}\n\nFix: ${err.fix}`
                         );
                     } else {
-                        void vscode.window.showErrorMessage(
+                        void showAutoError(
                             `Failed to create worktree: ${err instanceof Error ? err.message : String(err)}`
                         );
                     }
@@ -357,7 +359,7 @@ export async function activate(
                     );
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Failed to delete worktree '${wt.branch}': ${msg}`
                     );
                 }
@@ -375,7 +377,7 @@ export async function activate(
                     worktrees = await listAllWorktrees(repoRoot);
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    void vscode.window.showErrorMessage(`Failed to list worktrees: ${msg}`);
+                    void showAutoError(`Failed to list worktrees: ${msg}`);
                     return;
                 }
                 const removable = worktrees.filter((wt) => !wt.isMain);
@@ -504,6 +506,39 @@ export async function activate(
             return;
         }
 
+        // Check if worktree is behind remote — warn before starting work
+        try {
+            const worktrees = await listAllWorktrees(repoRoot);
+            const wt = worktrees.find((w) => w.path === worktreePath);
+            if (wt && wt.behind > 0) {
+                const action = await vscode.window.showWarningMessage(
+                    `'${branch}' is ${wt.behind} commit(s) behind remote. Pull before starting to avoid conflicts.`,
+                    "Sync & Continue",
+                    "Continue Anyway",
+                    "Cancel"
+                );
+                if (action === "Sync & Continue") {
+                    await vscode.window.withProgress(
+                        {
+                            location: vscode.ProgressLocation.Notification,
+                            title: `Syncing ${branch}...`,
+                            cancellable: false,
+                        },
+                        async () => {
+                            await fetchRemote(repoRoot);
+                            await syncWorktree(worktreePath);
+                        }
+                    );
+                    refreshAll();
+                    void showAutoInfo(`Synced '${branch}' with remote.`);
+                } else if (action !== "Continue Anyway") {
+                    return;
+                }
+            }
+        } catch {
+            // Non-critical — proceed even if the check fails
+        }
+
         // Prompt for task description if not provided
         let task = taskDescription;
         if (task === undefined) {
@@ -570,7 +605,7 @@ export async function activate(
                     );
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Failed to launch session: ${msg}`
                     );
                 }
@@ -603,7 +638,7 @@ export async function activate(
                     sessionTracker.stopSession(item.session.id);
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Failed to stop session: ${msg}`
                     );
                 }
@@ -638,7 +673,7 @@ export async function activate(
                     );
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Failed to stop sessions: ${msg}`
                     );
                 }
@@ -684,7 +719,7 @@ export async function activate(
                     sessionTracker.setTaskDescription(item.session.id, desc);
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Failed to update task description: ${msg}`
                     );
                 }
@@ -715,7 +750,7 @@ export async function activate(
                     );
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Failed to open terminal: ${msg}`
                     );
                 }
@@ -733,7 +768,7 @@ export async function activate(
                     await openInNewWindow(item.worktree.path);
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Failed to open new window: ${msg}`
                     );
                 }
@@ -762,9 +797,55 @@ export async function activate(
                     terminal.sendText(`git diff ${sanitizeRefName(baseBranch)}...HEAD --stat`);
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Failed to view diff: ${msg}`
                     );
+                }
+            }
+        )
+    );
+
+    // Sync Worktree — pull latest from remote
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            "grove.syncWorktree",
+            async (item?: WorktreeItem) => {
+                if (!item?.worktree) return;
+                const wt = item.worktree;
+
+                try {
+                    await vscode.window.withProgress(
+                        {
+                            location: vscode.ProgressLocation.Notification,
+                            title: `Syncing ${wt.branch}...`,
+                            cancellable: false,
+                        },
+                        async () => {
+                            // Fetch first so we have the latest remote refs
+                            await fetchRemote(repoRoot);
+                            await syncWorktree(wt.path);
+                        }
+                    );
+                    refreshAll();
+                    void showAutoInfo(
+                        `Synced '${wt.branch}' with remote.`
+                    );
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    if (msg.includes("no tracking information")) {
+                        void showAutoWarning(
+                            `Branch '${wt.branch}' has no remote tracking branch. Push it first with: git push -u origin ${wt.branch}`
+                        );
+                    } else if (msg.includes("conflict")) {
+                        void showAutoWarning(
+                            `Rebase conflict while syncing '${wt.branch}'. Resolve in terminal.`
+                        );
+                        openTerminal(`Sync: ${wt.branch}`, wt.path);
+                    } else {
+                        void showAutoError(
+                            `Failed to sync '${wt.branch}': ${msg}`
+                        );
+                    }
                 }
             }
         )
@@ -825,7 +906,7 @@ export async function activate(
                 }
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
-                void vscode.window.showErrorMessage(
+                void showAutoError(
                     `Quick menu error: ${msg}`
                 );
             }
@@ -875,7 +956,7 @@ export async function activate(
                     templateDir
                 );
                 if (!template) {
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Failed to load template: ${templatePick.label}`
                     );
                     return;
@@ -982,7 +1063,7 @@ export async function activate(
                 }
                 } catch (err) {
                     logError("Team launch failed", err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Team launch failed: ${err instanceof Error ? err.message : String(err)}`
                     );
                 }
@@ -1010,7 +1091,7 @@ export async function activate(
                     refreshAll();
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Failed to stop team: ${msg}`
                     );
                 }
@@ -1030,7 +1111,7 @@ export async function activate(
                     refreshAll();
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Failed to stop agent: ${msg}`
                     );
                 }
@@ -1085,7 +1166,7 @@ export async function activate(
                             await orchestrator.cleanupTeam(teamId);
                         } catch (err) {
                             logError("Team cleanup failed", err);
-                            void vscode.window.showErrorMessage(
+                            void showAutoError(
                                 `Cleanup failed: ${err instanceof Error ? err.message : String(err)}`
                             );
                         }
@@ -1151,7 +1232,7 @@ export async function activate(
                 );
                 } catch (err) {
                     logError("Overlap check failed", err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Overlap check failed: ${err instanceof Error ? err.message : String(err)}`
                     );
                 }
@@ -1230,7 +1311,7 @@ export async function activate(
                 void showAutoInfo(msg);
                 } catch (err) {
                     logError("Merge report generation failed", err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Merge report failed: ${err instanceof Error ? err.message : String(err)}`
                     );
                 }
@@ -1328,7 +1409,7 @@ export async function activate(
                 // Pre-flight: ensure repo is in a clean state
                 const repoState = await checkRepoState(repoRoot);
                 if (!repoState.clean) {
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Cannot start merge: ${repoState.reason}`
                     );
                     return;
@@ -1422,8 +1503,9 @@ export async function activate(
                                     const previouslyMerged = mergedBranches.length > 0
                                         ? ` Previously merged: ${mergedBranches.join(", ")}.`
                                         : "";
-                                    void vscode.window.showInformationMessage(
-                                        `Merge aborted for '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`
+                                    void showAutoInfo(
+                                        `Merge aborted for '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`,
+                                        20_000
                                     );
                                     break;
                                 }
@@ -1449,8 +1531,9 @@ export async function activate(
                             const previouslyMerged = mergedBranches.length > 0
                                 ? ` Previously merged: ${mergedBranches.join(", ")}.`
                                 : "";
-                            void vscode.window.showInformationMessage(
-                                `Merge aborted for '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`
+                            void showAutoInfo(
+                                `Merge aborted for '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`,
+                                20_000
                             );
                             break;
                         } else {
@@ -1489,8 +1572,9 @@ export async function activate(
                             const previouslyMerged = mergedBranches.length > 0
                                 ? ` Previously merged: ${mergedBranches.join(", ")}.`
                                 : "";
-                            void vscode.window.showInformationMessage(
-                                `Merge aborted for '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`
+                            void showAutoInfo(
+                                `Merge aborted for '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`,
+                                20_000
                             );
                             break;
                         }
@@ -1538,8 +1622,9 @@ export async function activate(
                                     const previouslyMerged = mergedBranches.length > 0
                                         ? ` Previously merged: ${mergedBranches.join(", ")}.`
                                         : "";
-                                    void vscode.window.showInformationMessage(
-                                        `Merge sequence stopped after test failure on '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`
+                                    void showAutoInfo(
+                                        `Merge sequence stopped after test failure on '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`,
+                                        20_000
                                     );
                                     break;
                                 }
@@ -1548,8 +1633,9 @@ export async function activate(
                                 const previouslyMerged = mergedBranches.length > 0
                                     ? ` Previously merged: ${mergedBranches.join(", ")}.`
                                     : "";
-                                void vscode.window.showInformationMessage(
-                                    `Merge sequence stopped after test failure on '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`
+                                void showAutoInfo(
+                                    `Merge sequence stopped after test failure on '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`,
+                                    20_000
                                 );
                                 break;
                             }
@@ -1601,7 +1687,7 @@ export async function activate(
                 refreshAll();
                 } catch (err) {
                     logError("Merge sequence failed", err);
-                    void vscode.window.showErrorMessage(
+                    void showAutoError(
                         `Merge sequence failed: ${err instanceof Error ? err.message : String(err)}`
                     );
                 }

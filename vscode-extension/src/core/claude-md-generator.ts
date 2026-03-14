@@ -66,6 +66,13 @@ export function buildClaudeMdContent(options: ClaudeMdOptions): string {
     sections.push("");
     sections.push(`> **Team:** ${template.name} | **Role:** ${agent.role} | **Session:** ${teamName}`);
     sections.push("");
+    sections.push(
+        "**IMPORTANT: These agent-specific instructions take priority over any " +
+        "project-level CLAUDE.md instructions regarding file ownership and boundaries. " +
+        "YOU MUST respect the file ownership rules below — do not modify files " +
+        "outside your assigned ownership patterns.**"
+    );
+    sections.push("");
 
     // ── Task Description ────────────────────────────
     if (taskDescription) {
@@ -95,7 +102,7 @@ export function buildClaudeMdContent(options: ClaudeMdOptions): string {
     sections.push("");
 
     if (agent.ownership.length > 0) {
-        sections.push("You **own** the following file patterns. Focus your work here:");
+        sections.push("**YOU MUST** focus your work on these file patterns — they are yours:");
         sections.push("");
         for (const pattern of agent.ownership) {
             sections.push(`- \`${pattern}\``);
@@ -107,7 +114,10 @@ export function buildClaudeMdContent(options: ClaudeMdOptions): string {
     const otherAgents = template.agents.filter((a) => a.role !== agent.role);
     const otherOwnedAgents = otherAgents.filter((a) => a.ownership.length > 0);
     if (otherOwnedAgents.length > 0) {
-        sections.push("**Do NOT modify** files owned by other agents:");
+        sections.push(
+            "**IMPORTANT: YOU MUST NOT modify** files owned by other agents. " +
+            "If you need changes in these files, use the Handoff Protocol below instead:"
+        );
         sections.push("");
         for (const other of otherOwnedAgents) {
             const patterns = other.ownership.map((p) => `\`${p}\``).join(", ");
@@ -121,8 +131,8 @@ export function buildClaudeMdContent(options: ClaudeMdOptions): string {
         sections.push("## Shared Files Protocol");
         sections.push("");
         sections.push(
-            "The following files may be needed by multiple agents. " +
-            "**Do NOT modify these directly.** Instead, document your required " +
+            "**IMPORTANT:** The following files may be needed by multiple agents. " +
+            "**YOU MUST NOT modify these directly.** Instead, document your required " +
             "changes in `SHARED-CHANGES.md` in the root of this worktree."
         );
         sections.push("");

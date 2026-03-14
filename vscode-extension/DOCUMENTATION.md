@@ -25,8 +25,9 @@
 9. [Built-in Team Templates](#built-in-team-templates)
 10. [Configuration Reference](#configuration-reference)
 11. [Project-Level Configuration](#project-level-configuration)
-12. [Tips for Efficient Usage](#tips-for-efficient-usage)
-13. [Troubleshooting](#troubleshooting)
+12. [Claude Code Compatibility](#claude-code-compatibility)
+13. [Tips for Efficient Usage](#tips-for-efficient-usage)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -471,6 +472,17 @@ Step 4 ─ Cleanup
 - Batch delete with confirmation dialog
 - Skips protected branches
 
+**Sync from Remote:**
+- Click the cloud-download icon on any worktree to pull latest changes
+- Runs `git fetch --all --prune` then `git pull --rebase --autostash`
+- Auto-stashes uncommitted changes, pulls, then reapplies them — no code is lost
+- Also available via right-click → "Sync from Remote"
+
+**Ahead/Behind Indicators:**
+- Each worktree shows `↓3` (behind remote) and `↑1` (ahead of remote) in the sidebar
+- Counts update every time the sidebar refreshes
+- Tooltip shows detailed sync status
+
 **Branch Strategy Resolution:**
 - If local branch exists: uses it
 - If remote branch exists but no local: tracks it
@@ -509,6 +521,11 @@ Step 4 ─ Cleanup
   - Resume from checkpoint
   - Start fresh
 
+**Behind-Remote Warning:**
+- Before launching Claude, checks if the worktree branch is behind the remote
+- If behind, shows a warning: "'feature-x' is 3 commit(s) behind remote. Pull before starting to avoid conflicts."
+- Options: "Sync & Continue" (auto-pulls), "Continue Anyway", or "Cancel"
+
 ### 3. Agent Teams — One-Click Orchestration
 
 **What:** Deploy a coordinated team of Claude Code agents with a single click.
@@ -522,46 +539,73 @@ Before any worktree is created, the system:
 5. Shows confirmation with worktree count and estimated token cost
 
 **Per-Agent CLAUDE.md Generation:**
-Each agent gets a tailored instruction file containing:
+Each agent gets a tailored instruction file with **IMPORTANT** and **YOU MUST** emphasis markers (following Claude Code's own documentation recommendations for improving instruction adherence):
 
 ```
-# Grove — Agent Session
-Team: login-feature | Role: Backend Architect
-───────────────────────────────────────
+# Backend Architect — Grove Agent
 
-## Your Task
+> **Team:** Full-Stack Team | **Role:** backend | **Session:** login-feature
+
+**IMPORTANT: These agent-specific instructions take priority over any
+project-level CLAUDE.md instructions regarding file ownership and boundaries.
+YOU MUST respect the file ownership rules below — do not modify files
+outside your assigned ownership patterns.**
+
+## Task
 [User's task description]
 
 ## Your Role
 [Agent's role prompt from template]
 
 ## File Ownership
-You OWN these paths — only modify files matching these patterns:
-  - src/api/**
-  - src/models/**
-  - src/services/**
+**YOU MUST** focus your work on these file patterns — they are yours:
+  - `src/api/**`
+  - `src/models/**`
+  - `src/services/**`
 
-Other agents own:
-  - Frontend Dev: src/components/**, src/pages/**
-  - Test Engineer: tests/**, src/**/*.test.*
+**IMPORTANT: YOU MUST NOT modify** files owned by other agents:
+  - **Frontend Dev** (frontend): `src/components/**`, `src/pages/**`
+  - **Test Engineer** (tests): `tests/**`, `src/**/*.test.*`
 
 ## Shared Files Protocol
-DO NOT directly modify shared files. Instead, document changes in SHARED-CHANGES.md.
-  - package.json
-  - tsconfig.json
+**IMPORTANT:** ... **YOU MUST NOT modify these directly.**
+Instead, document changes in SHARED-CHANGES.md.
+  - `package.json`
+  - `tsconfig.json`
 
 ## Handoff Protocol
 If you need changes in files you don't own, create HANDOFF.md.
 
 ## Project Conventions
 [Pulled from .grove/config.json]
+
+## Project-Level Instructions (from main repo)
+[Contents of the repo's existing CLAUDE.md, if any]
 ```
+
+**Cancellable Launch:**
+- The launch process shows a progress notification with a Cancel button
+- If cancelled mid-launch, all worktrees and CLAUDE.md files created so far are deleted
+- Any sessions already spawned are stopped
+- Team status is set to "cancelled"
+
+**Launch Guard:**
+- Only one team can be launched at a time — concurrent launches are rejected with a message
+- Before launching, active session count is checked against `grove.maxConcurrentSessions`
+- If the limit would be exceeded, a warning offers "Proceed" or "Cancel"
+
+**Team Persistence:**
+- Team state persists to `.grove/teams.json` (atomic write — crash-safe)
+- On VS Code restart, teams with existing worktrees are restored with status "stopped"
+- Completed/errored/cancelled teams preserve their original status
+- No terminal reconnection is attempted — restart a session manually if needed
 
 **Team Status Sync:**
 - Team status automatically updates based on agent session states
 - All agents running → team "running"
 - All agents done → team "completed"
 - Any agent errored → team "error"
+- All agents manually stopped → team "stopped" (not "completed")
 
 **Cleanup:**
 - Right-click team → "Cleanup Team Worktrees"
@@ -636,15 +680,30 @@ If the template defines `mergeOrder`, that is used. Otherwise, smart ordering ba
 | Tests | 5th (score 80) | Test the integrated result |
 | No changes | Skip (score 100) | Nothing to merge |
 
+**Pre-Merge Safety:**
+1. Checks for active Claude sessions in worktrees being merged — offers "Stop All & Continue" or "Cancel"
+2. Saves all open VS Code files (`saveAll`)
+3. Verifies the repo is in a clean state (no in-progress merge/rebase)
+
 **Merge Execution:**
 For each worktree in order:
-1. Auto-commit any uncommitted changes (stages all, commits with descriptive message)
+1. Auto-commit uncommitted changes (`git add -u` for tracked files only — won't stage .env or CLAUDE.md)
 2. Checkout base branch (main)
 3. Merge the worktree's branch (`git merge <branch>`)
 4. If conflict: pause, show conflicting files, let user resolve
 5. If clean: optionally run tests
 6. If tests pass: continue to next merge
-7. If tests fail: pause, show failure, let user decide
+7. If tests fail: pause with "Continue Anyway" / "Open Terminal" / "Abort" — "Open Terminal" pauses the sequence to let you investigate
+
+**Abort Semantics:**
+- Captures a pre-merge commit hash (`git rev-parse HEAD`) before the first merge
+- Tracks which branches were successfully merged as the loop progresses
+- When "Abort" is clicked, the abort message includes:
+  - Which branch's merge was aborted
+  - Which branches were already merged successfully
+  - The pre-merge hash: `git reset --hard <hash>` to undo all merges if needed
+- Previous merges are NOT rolled back automatically — that's a destructive operation left to the user
+- Dialog dismissal (pressing Escape) is always treated as abort/cancel, never as "continue"
 
 **Post-Merge Cleanup:**
 - Option to delete all worktrees after successful merge
@@ -783,7 +842,7 @@ Project templates override global templates (`~/.grove/templates/`), which overr
 |---------|------|---------|-------------|
 | `grove.defaultBaseBranch` | string | `"main"` | Base branch for comparisons and new worktrees |
 | `grove.autoInstallDependencies` | boolean | `true` | Install dependencies after creating worktrees |
-| `grove.packageManager` | enum | `"auto"` | Package manager: auto, npm, yarn, pnpm, pip, poetry |
+| `grove.packageManager` | enum | `"auto"` | Package manager: auto, npm, yarn, pnpm, pip, pipenv, poetry |
 | `grove.worktreeLocation` | string | `".claude/worktrees"` | Directory for worktrees (relative to repo root) |
 | `grove.enableAgentTeams` | boolean | `true` | Enable Agent Teams features |
 | `grove.templateDirectory` | string | `".grove/templates"` | Directory for team templates |
@@ -831,6 +890,37 @@ Create `.grove/config.json` in your repo root for project-specific settings:
 
 ---
 
+## Claude Code Compatibility
+
+Grove is designed to work alongside Claude Code, not replace it. Here's how the two interact:
+
+**How Grove launches Claude Code:**
+- Grove spawns `claude` CLI processes in VS Code integrated terminals — no API calls, no SDK, no bundled AI
+- Each worktree gets its own `claude` session running in its directory
+- Claude Code reads the generated CLAUDE.md from the worktree root as it normally would
+
+**Agent Teams vs. manual parallel sessions:**
+- Claude Code has a native Agent Teams feature (team lead spawns teammates with shared task lists and messaging)
+- Grove implements the "manual parallel sessions with git worktrees" workflow described in Claude Code's own docs
+- Both approaches are valid — Grove adds worktree management UI, overlap detection, and merge intelligence on top
+- You can use Claude Code's native Agent Teams inside a Grove-managed worktree if you want both
+
+**Settings Grove writes:**
+- `~/.claude/settings.json` → sets `"env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" }` when the `grove.enableAgentTeams` setting is enabled
+- Grove does NOT modify any other Claude Code settings
+
+**CLAUDE.md handling:**
+- Grove generates a CLAUDE.md in each worktree with agent-specific instructions (ownership, boundaries, task)
+- Claude Code loads this CLAUDE.md at session start, as it would with any project CLAUDE.md
+- The generated CLAUDE.md includes an IMPORTANT priority note so agent-specific rules take precedence over inherited project rules
+- If the main repo has a CLAUDE.md, its content is included at the bottom of the generated file as reference
+
+**What to avoid:**
+- Do not use `claude --worktree` inside a Grove-managed worktree — the `--worktree` flag creates its own worktree and auto-cleans it on exit, conflicting with Grove's lifecycle management
+- If you use custom `WorktreeCreate`/`WorktreeRemove` hooks in Claude Code for non-Git VCS, Grove bypasses them (it uses native git commands)
+
+---
+
 ## Tips for Efficient Usage
 
 ### Do
@@ -851,6 +941,7 @@ Create `.grove/config.json` in your repo root for project-specific settings:
 - **Don't manually edit files in worktree directories** while an agent is running there. The agent won't know about your changes and may overwrite them.
 - **Don't use teams for trivial tasks.** A single worktree with one agent is faster and cheaper for small changes. Teams are for features that genuinely benefit from parallel work.
 - **Don't delete worktrees with running sessions.** Stop the session first, then delete.
+- **Don't use `claude --worktree` inside a Grove-managed worktree.** The `--worktree` flag creates its own worktree and auto-cleans it on exit, which conflicts with Grove's worktree lifecycle. Launch Claude sessions through Grove's sidebar (rocket icon) or by running `claude` (without the `--worktree` flag) inside the worktree directory.
 
 ---
 
@@ -877,13 +968,16 @@ The sequencer pauses and shows which files conflict. Resolve conflicts in the ma
 Check that the `claude` CLI is installed and available in your PATH. Run `which claude` in a terminal to verify. The extension launches Claude through a clean zsh shell — if claude is installed via a custom PATH setup, it may not be found.
 
 ### Agent Teams env var not set
-The extension auto-writes `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: true` to `~/.claude/settings.json`. If teams still don't work, check that file exists and contains the setting.
+The extension auto-writes `"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"` inside the `"env"` key of `~/.claude/settings.json`. If teams still don't work, verify the file contains `{ "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" } }`. The value must be `"1"` (not `"true"`) and must be nested inside `"env"`, not at the root level.
 
 ### Worktree creation fails with "branch already exists"
 The extension auto-detects existing branches. If the branch exists locally, it uses it. If it exists only on remote, it tracks it. The error usually means git is in an unexpected state — try `git worktree prune` to clean up stale references.
 
 ### Dashboard shows 0 files changed
 Files are only counted after agents commit their work. If agents are still running (code is uncommitted), the merge report auto-commits before analysis. Make sure sessions are completed before generating the report.
+
+### Custom WorktreeCreate/WorktreeRemove hooks are not triggered
+If you use custom `WorktreeCreate` or `WorktreeRemove` hooks in Claude Code's `settings.json` (e.g., for non-Git version control like SVN, Perforce, or Mercurial), Grove bypasses these hooks. Grove uses native `git worktree add` / `git worktree remove` commands directly. This only affects users with non-Git version control setups — standard Git users are unaffected.
 
 ---
 
@@ -902,3 +996,20 @@ All commands are available via `Cmd+Shift+P` (macOS) or `Ctrl+Shift+P` (Windows/
 | `Grove: Cleanup Stale Worktrees` | Find and remove idle worktrees |
 | `Grove: Stop All Sessions` | Close all active Claude Code terminals |
 | `Grove: Quick Menu` | Open the status bar quick menu |
+
+**Sidebar-only commands** (available via icons and right-click menus):
+
+| Command | Icon | Where |
+|---------|------|-------|
+| `Grove: Sync from Remote` | `$(cloud-download)` | Worktree inline icon, right-click menu |
+| `Grove: Launch Claude Code in Worktree` | `$(rocket)` | Worktree inline icon |
+| `Grove: Open in Terminal` | `$(terminal)` | Worktree inline icon |
+| `Grove: Delete Worktree` | — | Worktree right-click menu |
+| `Grove: View Diff` | — | Worktree right-click menu |
+| `Grove: Open in New Window` | — | Worktree right-click menu |
+| `Grove: Stop Session` | `$(debug-stop)` | Session inline icon |
+| `Grove: Open Session Terminal` | `$(terminal)` | Session inline icon |
+| `Grove: Set Task Description` | — | Session right-click menu |
+| `Grove: Stop Team` | `$(debug-stop)` | Team inline icon |
+| `Grove: Stop Agent` | `$(debug-stop)` | Agent inline icon |
+| `Grove: Cleanup Team Worktrees` | `$(trash)` | Team right-click menu |
