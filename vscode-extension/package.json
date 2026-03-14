@@ -1,28 +1,47 @@
 {
-  "name": "grove",
-  "displayName": "Grove",
+  "name": "grove-pilot",
+  "displayName": "Grove — AI Dev",
   "description": "Control plane for parallel AI development — git worktree management, Claude Code session orchestration, and merge intelligence",
   "version": "0.2.0",
-  "publisher": "grove",
+  "publisher": "ShebinMohanK",
+  "author": {
+    "name": "Shebin K Mohan",
+    "url": "https://github.com/ShebinKMohan"
+  },
   "license": "MIT",
+  "icon": "media/icon.png",
+  "pricing": "Free",
   "repository": {
     "type": "git",
     "url": "https://github.com/ShebinKMohan/WorkTree_Pilot"
+  },
+  "homepage": "https://github.com/ShebinKMohan/WorkTree_Pilot#readme",
+  "bugs": {
+    "url": "https://github.com/ShebinKMohan/WorkTree_Pilot/issues"
+  },
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
   },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
     "SCM Providers",
+    "Programming Languages",
     "Other"
   ],
   "keywords": [
     "git",
     "worktree",
     "claude",
+    "claude code",
     "parallel development",
     "AI agents",
-    "agent teams"
+    "agent teams",
+    "AI coding",
+    "merge",
+    "orchestration"
   ],
   "activationEvents": [
     "workspaceContains:.git"
