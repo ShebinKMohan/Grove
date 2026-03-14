@@ -13,7 +13,6 @@ import {
     listWorktrees,
     getWorktreeStatus,
     listAllWorktrees,
-    BRANCH_PREFIXES,
     PROTECTED_BRANCHES,
 } from "../../src/core/worktree-manager";
 
@@ -76,20 +75,6 @@ describe("worktree-manager", () => {
             assert.ok(validateBranchName("has:colon") !== null);
             assert.ok(validateBranchName("has?question") !== null);
             assert.ok(validateBranchName("has*star") !== null);
-        });
-    });
-
-    describe("BRANCH_PREFIXES", () => {
-        it("contains expected prefixes", () => {
-            assert.ok(BRANCH_PREFIXES.includes("feature/"));
-            assert.ok(BRANCH_PREFIXES.includes("fix/"));
-            assert.ok(BRANCH_PREFIXES.includes("hotfix/"));
-        });
-
-        it("all end with /", () => {
-            for (const prefix of BRANCH_PREFIXES) {
-                assert.ok(prefix.endsWith("/"), `${prefix} should end with /`);
-            }
         });
     });
 

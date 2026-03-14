@@ -10,6 +10,7 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import { getChangedFiles } from "./worktree-manager";
+import { sanitizeRefName } from "../utils/git";
 import { log, logError } from "../utils/logger";
 
 // ────────────────────────────────────────────
@@ -189,9 +190,20 @@ export class SessionTracker implements vscode.Disposable {
      * Stop all active sessions.
      */
     stopAllSessions(): void {
+        // Dispose terminals for sessions that have terminal mappings
         for (const [terminal] of this.terminalMap) {
             terminal.dispose();
         }
+        // Also mark any orphaned "running"/"idle" sessions as completed
+        // (sessions whose terminals were already closed but status wasn't updated)
+        for (const session of this.sessions.values()) {
+            if (session.status === "running" || session.status === "idle") {
+                session.status = "completed";
+                session.endedAt = session.endedAt ?? new Date().toISOString();
+            }
+        }
+        this.persistSessions();
+        this._onDidChangeSessions.fire();
     }
 
     /**
@@ -330,14 +342,14 @@ export class SessionTracker implements vscode.Disposable {
                 diffTerminal.show();
                 const config = vscode.workspace.getConfiguration("worktreePilot");
                 const baseBranch = config.get<string>("defaultBaseBranch", "main");
-                diffTerminal.sendText(`git diff ${baseBranch}...HEAD --stat`);
+                diffTerminal.sendText(`git diff ${sanitizeRefName(baseBranch)}...HEAD --stat`);
             }
         }
     }
 
     private generateId(): string {
         const ts = Date.now().toString(36);
-        const rand = Math.random().toString(36).slice(2, 6);
+        const rand = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
         return `${ts}-${rand}`;
     }
 
@@ -367,10 +379,11 @@ export class SessionTracker implements vscode.Disposable {
                 })
             );
 
-            fs.writeFileSync(
-                this.sessionsFilePath,
-                JSON.stringify(data, null, 2) + "\n"
-            );
+            // Write to temp file then rename for atomic persistence.
+            // Prevents corrupted JSON if VS Code crashes mid-write.
+            const tmpPath = this.sessionsFilePath + ".tmp";
+            fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2) + "\n");
+            fs.renameSync(tmpPath, this.sessionsFilePath);
         } catch (err) {
             logError("Failed to persist sessions", err);
         }
@@ -381,20 +394,48 @@ export class SessionTracker implements vscode.Disposable {
             if (!fs.existsSync(this.sessionsFilePath)) return;
 
             const raw = fs.readFileSync(this.sessionsFilePath, "utf-8");
-            const data = JSON.parse(raw) as PersistedSession[];
+            let data: PersistedSession[];
+            try {
+                data = JSON.parse(raw) as PersistedSession[];
+            } catch {
+                // JSON is corrupted (e.g., partial write from a crash).
+                // Try the temp file as a backup.
+                const tmpPath = this.sessionsFilePath + ".tmp";
+                if (fs.existsSync(tmpPath)) {
+                    try {
+                        data = JSON.parse(fs.readFileSync(tmpPath, "utf-8")) as PersistedSession[];
+                        log("Restored sessions from backup (.tmp) after corrupted sessions.json");
+                    } catch {
+                        logError("Both sessions.json and .tmp are corrupted. Starting fresh.", undefined);
+                        return;
+                    }
+                } else {
+                    logError("sessions.json is corrupted and no backup exists. Starting fresh.", undefined);
+                    return;
+                }
+            }
+            if (!Array.isArray(data)) return;
 
             for (const persisted of data) {
                 // Mark previously-running sessions as completed (VS Code restarted)
-                const status: SessionStatus =
-                    persisted.status === "running" || persisted.status === "idle"
-                        ? "completed"
-                        : persisted.status;
+                const wasRunning =
+                    persisted.status === "running" || persisted.status === "idle";
+                const status: SessionStatus = wasRunning
+                    ? "completed"
+                    : persisted.status;
 
                 this.sessions.set(persisted.id, {
                     ...persisted,
                     status,
-                    endedAt: persisted.endedAt ?? new Date().toISOString(),
+                    // For interrupted sessions, use the persisted endedAt
+                    // or fall back to startedAt so the UI shows a valid elapsed time
+                    endedAt: persisted.endedAt ?? (wasRunning ? persisted.startedAt : undefined),
                     modifiedFiles: [],
+                    ...(wasRunning && !persisted.endedAt
+                        ? { taskDescription: persisted.taskDescription
+                            ? `[interrupted] ${persisted.taskDescription}`
+                            : "[interrupted]" }
+                        : {}),
                 });
             }
 

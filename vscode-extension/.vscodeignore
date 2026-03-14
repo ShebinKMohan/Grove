@@ -18,3 +18,5 @@ tsconfig.json
 .worktreepilot/**
 .claude/**
 *.vsix
+DOCUMENTATION.md
+CLAUDE.md

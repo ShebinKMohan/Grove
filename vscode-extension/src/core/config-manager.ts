@@ -5,7 +5,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { log, logError } from "../utils/logger";
+import { logError } from "../utils/logger";
 
 export interface ProjectConfig {
     projectName?: string;
@@ -42,56 +42,3 @@ export function loadProjectConfig(repoRoot: string): ProjectConfig | null {
     }
 }
 
-/**
- * Save the project config to .worktreepilot/config.json.
- */
-export function saveProjectConfig(
-    repoRoot: string,
-    config: ProjectConfig
-): void {
-    const configDir = path.join(repoRoot, CONFIG_DIR);
-    const configPath = path.join(configDir, CONFIG_FILE);
-
-    if (!fs.existsSync(configDir)) {
-        fs.mkdirSync(configDir, { recursive: true });
-    }
-
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
-    log(`Saved project config to ${configPath}`);
-}
-
-/**
- * Get a specific config value by dotted key path.
- * e.g., getConfigValue(config, "conventions.framework") → "FastAPI + React"
- */
-export function getConfigValue(
-    config: ProjectConfig,
-    key: string
-): string | string[] | undefined {
-    const parts = key.split(".");
-    let current: unknown = config;
-
-    for (const part of parts) {
-        if (current === null || current === undefined || typeof current !== "object") {
-            return undefined;
-        }
-        current = (current as Record<string, unknown>)[part];
-    }
-
-    if (typeof current === "string") return current;
-    if (Array.isArray(current)) return current as string[];
-    return undefined;
-}
-
-/**
- * Ensure the .worktreepilot directory exists and is gitignored.
- */
-export function ensureConfigDirectory(repoRoot: string): string {
-    const configDir = path.join(repoRoot, CONFIG_DIR);
-
-    if (!fs.existsSync(configDir)) {
-        fs.mkdirSync(configDir, { recursive: true });
-    }
-
-    return configDir;
-}

@@ -9,12 +9,10 @@ import * as os from "os";
 import {
     git,
     gitWrite,
-    isGitRepo,
     getRepoRoot,
     getCurrentBranch,
     branchExistsLocally,
     branchExistsOnRemote,
-    listLocalBranches,
     GitError,
 } from "../../src/utils/git";
 
@@ -65,19 +63,8 @@ describe("utils/git", () => {
             initRepo();
             // Create a branch through the write queue
             await gitWrite(["branch", "test-branch"], tmpDir);
-            const branches = await listLocalBranches(tmpDir);
-            assert.ok(branches.includes("test-branch"));
-        });
-    });
-
-    describe("isGitRepo()", () => {
-        it("returns true for a git repo", async () => {
-            initRepo();
-            assert.strictEqual(await isGitRepo(tmpDir), true);
-        });
-
-        it("returns false for a non-repo directory", async () => {
-            assert.strictEqual(await isGitRepo(tmpDir), false);
+            const exists = await branchExistsLocally(tmpDir, "test-branch");
+            assert.strictEqual(exists, true);
         });
     });
 
@@ -124,15 +111,6 @@ describe("utils/git", () => {
                 await branchExistsOnRemote(tmpDir, "main"),
                 false
             );
-        });
-    });
-
-    describe("listLocalBranches()", () => {
-        it("lists branches in the repo", async () => {
-            initRepo();
-            const branches = await listLocalBranches(tmpDir);
-            assert.ok(Array.isArray(branches));
-            assert.ok(branches.length >= 1);
         });
     });
 

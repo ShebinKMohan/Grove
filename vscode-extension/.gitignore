@@ -5,3 +5,4 @@ webview-ui/node_modules/
 *.vsix
 .worktreepilot/
 .claude/worktrees/
+.vscode-test/

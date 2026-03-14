@@ -14,7 +14,7 @@ import {
     branchExistsOnRemote,
 } from "../utils/git";
 import { ensureGitignored } from "./gitignore";
-import { installDependencies } from "../utils/package-manager";
+import { installDependencies, type PackageManager } from "../utils/package-manager";
 import { log } from "../utils/logger";
 import {
     WorktreePilotError,
@@ -68,22 +68,6 @@ export interface CleanupResult {
 
 const DEFAULT_WORKTREE_DIR = ".claude/worktrees";
 
-export const BRANCH_PREFIXES: string[] = [
-    "feature/",
-    "fix/",
-    "hotfix/",
-    "refactor/",
-    "chore/",
-    "docs/",
-    "test/",
-    "release/",
-    "integration/",
-    "spike/",
-    "perf/",
-    "ci/",
-    "style/",
-];
-
 export const PROTECTED_BRANCHES = new Set([
     "main",
     "master",
@@ -103,6 +87,8 @@ export function validateBranchName(name: string): string | null {
     if (!name) return "Branch name cannot be empty.";
     if (name.startsWith("/") || name.endsWith("/"))
         return "Branch name cannot start or end with '/'.";
+    if (name.startsWith(".") || name.includes("/."))
+        return "Branch name components cannot start with '.'.";
     if (name.includes("..")) return "Branch name cannot contain '..'.";
     if (name.endsWith(".lock")) return "Branch name cannot end with '.lock'.";
     if (/[\s~^:?*]/.test(name))
@@ -186,7 +172,7 @@ export async function listWorktrees(repoRoot: string): Promise<WorktreeInfo[]> {
             }
             current = { path: line.slice(9) };
         } else if (line.startsWith("HEAD ")) {
-            current.commit = line.slice(5, 13);
+            current.commit = line.slice(5);
         } else if (line.startsWith("branch ")) {
             current.branch = line.slice(7).replace("refs/heads/", "");
         } else if (line === "bare") {
@@ -255,7 +241,9 @@ export async function getWorktreeStatus(
 
         return status;
     } catch {
-        return { modified: 0, staged: 0, untracked: 0, conflicts: 0 };
+        // Return -1 to signal that status could not be determined
+        // (corrupted index, broken .git file, locked repo, etc.)
+        return { modified: -1, staged: 0, untracked: 0, conflicts: 0 };
     }
 }
 
@@ -271,13 +259,19 @@ export async function listAllWorktrees(
         if (fs.existsSync(wt.path)) {
             const status = await getWorktreeStatus(wt.path);
             wt.status = status;
-            const changes: string[] = [];
-            if (status.modified) changes.push(`${status.modified}M`);
-            if (status.staged) changes.push(`${status.staged}S`);
-            if (status.untracked) changes.push(`${status.untracked}?`);
-            if (status.conflicts) changes.push(`${status.conflicts}!`);
-            wt.statusSummary =
-                changes.length > 0 ? changes.join(" ") : "clean";
+            if (status.modified === -1) {
+                // git status failed — worktree is broken
+                wt.statusSummary = "error";
+                wt.status = { modified: 0, staged: 0, untracked: 0, conflicts: 0 };
+            } else {
+                const changes: string[] = [];
+                if (status.modified) changes.push(`${status.modified}M`);
+                if (status.staged) changes.push(`${status.staged}S`);
+                if (status.untracked) changes.push(`${status.untracked}?`);
+                if (status.conflicts) changes.push(`${status.conflicts}!`);
+                wt.statusSummary =
+                    changes.length > 0 ? changes.join(" ") : "clean";
+            }
         } else {
             wt.statusSummary = "missing";
         }
@@ -299,6 +293,7 @@ export async function createWorktree(
         worktreeDir?: string;
         autoGitignore?: boolean;
         autoInstallDeps?: boolean;
+        packageManager?: PackageManager;
     } = {}
 ): Promise<CreationResult> {
     const strategy = await resolveBranchStrategy(repoRoot, branchName);
@@ -333,7 +328,7 @@ export async function createWorktree(
 
     // Auto-install dependencies
     if (options.autoInstallDeps) {
-        await installDependencies(wtPath);
+        await installDependencies(wtPath, options.packageManager);
     }
 
     const desc =
@@ -353,13 +348,18 @@ export async function removeWorktree(
     options: {
         deleteBranch?: boolean;
         force?: boolean;
+        protectedBranches?: string[];
     } = {}
 ): Promise<CleanupResult> {
     // Find branch name before removing
+    // Normalize both sides: git may return canonical paths (e.g. /private/var on macOS)
+    // while the caller passes the symlinked path (e.g. /var)
     const worktrees = await listWorktrees(repoRoot);
-    const wt = worktrees.find(
-        (w) => w.path === wtPath || w.path === path.resolve(wtPath)
-    );
+    const resolvedWtPath = fs.realpathSync?.(wtPath) ?? path.resolve(wtPath);
+    const wt = worktrees.find((w) => {
+        const resolvedW = fs.realpathSync?.(w.path) ?? path.resolve(w.path);
+        return resolvedW === resolvedWtPath;
+    });
     const branchName = wt?.branch;
 
     // Remove worktree
@@ -384,7 +384,9 @@ export async function removeWorktree(
         options.deleteBranch &&
         branchName &&
         branchName !== "(detached HEAD)" &&
-        !PROTECTED_BRANCHES.has(branchName)
+        !(options.protectedBranches
+            ? new Set(options.protectedBranches).has(branchName)
+            : PROTECTED_BRANCHES.has(branchName))
     ) {
         try {
             const delArgs = ["branch", options.force ? "-D" : "-d", branchName];
@@ -432,95 +434,6 @@ export async function getDiffStats(
     } catch {
         return "";
     }
-}
-
-/**
- * Run health checks on all worktrees.
- */
-export async function checkWorktreeHealth(
-    repoRoot: string
-): Promise<Array<{ worktree: string; issue: string; fix: string }>> {
-    const issues: Array<{ worktree: string; issue: string; fix: string }> = [];
-    const worktrees = await listWorktrees(repoRoot);
-
-    for (const wt of worktrees) {
-        if (!fs.existsSync(wt.path)) {
-            issues.push({
-                worktree: wt.branch || wt.path,
-                issue: `Path does not exist: ${wt.path}`,
-                fix: "Run: git worktree prune",
-            });
-            continue;
-        }
-
-        if (wt.branch === "(detached HEAD)") {
-            issues.push({
-                worktree: wt.path,
-                issue: "Detached HEAD state",
-                fix: "Run: git checkout <branch>",
-            });
-        }
-
-        // Check for locked worktrees
-        const gitFile = path.join(wt.path, ".git");
-        try {
-            const stat = fs.statSync(gitFile);
-            if (stat.isFile()) {
-                const content = fs.readFileSync(gitFile, "utf-8").trim();
-                if (content.startsWith("gitdir:")) {
-                    const gitdir = content.slice(7).trim();
-                    const lockFile = path.join(
-                        path.dirname(gitdir),
-                        "locked"
-                    );
-                    if (fs.existsSync(lockFile)) {
-                        issues.push({
-                            worktree: wt.branch || wt.path,
-                            issue: "Worktree is locked",
-                            fix: `Run: git worktree unlock ${wt.path}`,
-                        });
-                    }
-                }
-            }
-        } catch {
-            // Ignore errors checking .git file
-        }
-    }
-
-    // Check for stale entries
-    try {
-        const pruneOutput = await git(
-            ["worktree", "prune", "--dry-run"],
-            repoRoot
-        );
-        if (pruneOutput) {
-            issues.push({
-                worktree: "(stale entries)",
-                issue: "Stale worktree entries found",
-                fix: "Run: git worktree prune",
-            });
-        }
-    } catch {
-        // Ignore
-    }
-
-    return issues;
-}
-
-/**
- * Find stale worktrees — no changes, no active sessions, idle.
- */
-export async function findStaleWorktrees(
-    repoRoot: string,
-    _maxAgeDays: number = 7
-): Promise<WorktreeInfo[]> {
-    const worktrees = await listAllWorktrees(repoRoot);
-    return worktrees.filter((wt) => {
-        if (wt.isMain) return false;
-        if (wt.statusSummary === "missing") return true;
-        if (wt.statusSummary === "clean") return true;
-        return false;
-    });
 }
 
 // ────────────────────────────────────────────

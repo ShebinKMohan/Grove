@@ -15,26 +15,6 @@ export class WorktreePilotError extends Error {
     }
 }
 
-export class GitNotFoundError extends WorktreePilotError {
-    constructor() {
-        super(
-            "Git is not installed or not found in PATH.",
-            "Install git: https://git-scm.com/downloads"
-        );
-        this.name = "GitNotFoundError";
-    }
-}
-
-export class NotAGitRepoError extends WorktreePilotError {
-    constructor(path: string) {
-        super(
-            `No git repository found at or above ${path}.`,
-            "Run 'git init' or open a folder that contains a git repository."
-        );
-        this.name = "NotAGitRepoError";
-    }
-}
-
 export class BranchAlreadyCheckedOutError extends WorktreePilotError {
     constructor(branch: string) {
         super(

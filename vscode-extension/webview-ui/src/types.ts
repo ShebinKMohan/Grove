@@ -57,7 +57,6 @@ export type ExtensionMessage =
 export type WebViewMessage =
     | { type: "stop-session"; sessionId: string }
     | { type: "focus-session"; sessionId: string }
-    | { type: "open-terminal"; worktreePath: string; branch: string }
     | { type: "view-diff"; worktreePath: string; branch: string }
     | { type: "dismiss-overlap"; filePath: string }
     | { type: "dismiss-all-overlaps" }

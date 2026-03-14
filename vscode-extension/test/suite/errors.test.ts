@@ -5,8 +5,6 @@
 import * as assert from "assert";
 import {
     WorktreePilotError,
-    GitNotFoundError,
-    NotAGitRepoError,
     BranchAlreadyCheckedOutError,
     WorktreePathExistsError,
 } from "../../src/utils/errors";
@@ -37,45 +35,6 @@ describe("WorktreePilotError", () => {
     it("is an instance of Error", () => {
         const err = new WorktreePilotError("msg", "fix");
         assert.ok(err instanceof Error);
-    });
-});
-
-describe("GitNotFoundError", () => {
-    it("has correct message about git not found", () => {
-        const err = new GitNotFoundError();
-        assert.ok(err.message.includes("not installed"));
-    });
-
-    it("has fix suggesting git installation", () => {
-        const err = new GitNotFoundError();
-        assert.ok(err.fix.includes("git-scm.com"));
-    });
-
-    it("has correct name", () => {
-        const err = new GitNotFoundError();
-        assert.strictEqual(err.name, "GitNotFoundError");
-    });
-
-    it("is instance of WorktreePilotError", () => {
-        const err = new GitNotFoundError();
-        assert.ok(err instanceof WorktreePilotError);
-    });
-});
-
-describe("NotAGitRepoError", () => {
-    it("includes the path in message", () => {
-        const err = new NotAGitRepoError("/some/path");
-        assert.ok(err.message.includes("/some/path"));
-    });
-
-    it("suggests git init in fix", () => {
-        const err = new NotAGitRepoError("/some/path");
-        assert.ok(err.fix.includes("git init"));
-    });
-
-    it("has correct name", () => {
-        const err = new NotAGitRepoError("/x");
-        assert.strictEqual(err.name, "NotAGitRepoError");
     });
 });
 

@@ -12,6 +12,8 @@ interface VsCodeApi {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const vscode: VsCodeApi = (window as any).acquireVsCodeApi();
+const vscode: VsCodeApi = typeof (window as any).acquireVsCodeApi === "function"
+    ? (window as any).acquireVsCodeApi()
+    : { postMessage: () => {}, getState: () => null, setState: () => {} };
 
 export default vscode;

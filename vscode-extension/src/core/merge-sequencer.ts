@@ -173,54 +173,6 @@ export async function generateMergeReport(
     };
 }
 
-/**
- * Generate a merge report specifically for a team's worktrees.
- */
-export async function generateTeamMergeReport(
-    repoRoot: string,
-    agents: Array<{ worktreePath: string; branch: string; role: string }>,
-    baseBranch: string = "main",
-    templateMergeOrder?: string[]
-): Promise<MergeReport> {
-    const worktreePaths = agents
-        .filter((a) => a.worktreePath)
-        .map((a) => a.worktreePath);
-
-    const report = await generateMergeReport(repoRoot, worktreePaths, baseBranch);
-
-    // Override merge order if template defines one
-    if (templateMergeOrder && templateMergeOrder.length > 0) {
-        const roleToAgent = new Map(agents.map((a) => [a.role, a]));
-        const ordered: MergeOrderEntry[] = [];
-
-        for (const role of templateMergeOrder) {
-            const agent = roleToAgent.get(role);
-            if (agent?.worktreePath) {
-                ordered.push({
-                    branch: agent.branch,
-                    worktreePath: agent.worktreePath,
-                    reason: `Template merge order: ${role}`,
-                });
-            }
-        }
-
-        // Add any agents not in the template order
-        for (const wt of report.worktrees) {
-            if (!ordered.some((o) => o.worktreePath === wt.path)) {
-                ordered.push({
-                    branch: wt.branch,
-                    worktreePath: wt.path,
-                    reason: "Not in template merge order — appended",
-                });
-            }
-        }
-
-        report.mergeOrder = ordered;
-    }
-
-    return report;
-}
-
 // ────────────────────────────────────────────
 // Sequential Merge Execution
 // ────────────────────────────────────────────
@@ -265,9 +217,10 @@ export async function executeMergeStep(
         } catch (err) {
             // Check if it's a merge conflict
             const statusOutput = await git(["status", "--porcelain"], repoRoot);
+            const conflictPrefixes = ["UU", "AA", "DD", "DU", "UD", "AU", "UA"];
             const conflictFiles = statusOutput
                 .split("\n")
-                .filter((line) => line.startsWith("UU") || line.startsWith("AA") || line.startsWith("DU") || line.startsWith("UD"))
+                .filter((line) => conflictPrefixes.some((p) => line.startsWith(p)))
                 .map((line) => line.slice(3).trim());
 
             if (conflictFiles.length > 0) {
@@ -288,10 +241,52 @@ export async function executeMergeStep(
 }
 
 /**
- * Abort an in-progress merge.
+ * Check if the repository is in a clean state (no in-progress merge/rebase).
+ * Call this before starting a merge sequence.
+ */
+export async function checkRepoState(repoRoot: string): Promise<{ clean: boolean; reason?: string }> {
+    try {
+        const status = await git(["status", "--porcelain"], repoRoot);
+        const conflictPrefixes = ["UU", "AA", "DD", "DU", "UD", "AU", "UA"];
+        const hasConflicts = status.split("\n").some(
+            (line) => conflictPrefixes.some((p) => line.startsWith(p))
+        );
+        if (hasConflicts) {
+            return { clean: false, reason: "Repository has unresolved merge conflicts." };
+        }
+
+        // Check for uncommitted changes that could be destroyed by checkout/merge
+        if (status.trim().length > 0) {
+            return { clean: false, reason: "Working tree has uncommitted changes. Commit or stash them first." };
+        }
+
+        // Check for MERGE_HEAD (in-progress merge)
+        // Resolve against repoRoot since git-dir may be relative
+        const gitDir = path.resolve(repoRoot, (await git(["rev-parse", "--git-dir"], repoRoot)).trim());
+        if (fs.existsSync(path.join(gitDir, "MERGE_HEAD"))) {
+            return { clean: false, reason: "A merge is already in progress. Resolve or abort it first." };
+        }
+        if (fs.existsSync(path.join(gitDir, "rebase-merge")) || fs.existsSync(path.join(gitDir, "rebase-apply"))) {
+            return { clean: false, reason: "A rebase is in progress. Complete or abort it first." };
+        }
+    } catch {
+        // If we can't check, assume clean and let git fail naturally
+    }
+    return { clean: true };
+}
+
+/**
+ * Abort an in-progress merge and verify it was successful.
  */
 export async function abortMerge(repoRoot: string): Promise<void> {
     await gitWrite(["merge", "--abort"], repoRoot);
+
+    // Verify merge state is actually cleared
+    // Resolve against repoRoot since git-dir may be relative
+    const gitDir = path.resolve(repoRoot, (await git(["rev-parse", "--git-dir"], repoRoot)).trim());
+    if (fs.existsSync(path.join(gitDir, "MERGE_HEAD"))) {
+        throw new Error("Merge abort failed: merge state still present. Manual intervention required.");
+    }
 }
 
 /**
@@ -307,17 +302,17 @@ export async function runTests(
     const execFileAsync = promisify(execFile);
 
     try {
-        // Split the command into parts
-        const parts = testCommand.split(" ");
-        const cmd = parts[0];
-        const args = parts.slice(1);
-
-        const { stdout, stderr } = await execFileAsync(cmd, args, {
-            cwd: repoRoot,
-            maxBuffer: 10 * 1024 * 1024,
-            timeout: 5 * 60 * 1000, // 5 minute timeout
-            shell: true,
-        });
+        // Run the command through the shell to support complex commands
+        // (e.g. "npm test && npm run lint")
+        const { stdout, stderr } = await execFileAsync(
+            process.platform === "win32" ? "cmd" : "sh",
+            process.platform === "win32" ? ["/c", testCommand] : ["-c", testCommand],
+            {
+                cwd: repoRoot,
+                maxBuffer: 10 * 1024 * 1024,
+                timeout: 5 * 60 * 1000, // 5 minute timeout
+            },
+        );
 
         return {
             passed: true,
@@ -354,13 +349,22 @@ export function detectTestCommand(repoRoot: string): string | undefined {
         }
     }
 
-    // Check for pytest
-    if (
-        fs.existsSync(path.join(repoRoot, "pytest.ini")) ||
-        fs.existsSync(path.join(repoRoot, "setup.cfg")) ||
-        fs.existsSync(path.join(repoRoot, "pyproject.toml"))
-    ) {
+    // Check for pytest — only trust pytest.ini as a definitive indicator.
+    // pyproject.toml and setup.cfg are general Python config files and
+    // do not imply pytest is the test runner.
+    if (fs.existsSync(path.join(repoRoot, "pytest.ini"))) {
         return "pytest";
+    }
+    // Check pyproject.toml for [tool.pytest] section
+    if (fs.existsSync(path.join(repoRoot, "pyproject.toml"))) {
+        try {
+            const content = fs.readFileSync(path.join(repoRoot, "pyproject.toml"), "utf-8");
+            if (content.includes("[tool.pytest")) {
+                return "pytest";
+            }
+        } catch {
+            // Ignore
+        }
     }
 
     // Check for go tests
@@ -390,25 +394,31 @@ export async function postMergeCleanup(
     options: {
         deleteBranches?: boolean;
         removeClaudeMd?: boolean;
+        protectedBranches?: string[];
     } = {}
 ): Promise<{ removed: number; errors: string[] }> {
-    const { deleteBranches = true, removeClaudeMd = true } = options;
+    const { deleteBranches = true, removeClaudeMd = true, protectedBranches } = options;
     let removed = 0;
     const errors: string[] = [];
 
     for (const wt of worktrees) {
         try {
-            // Remove generated CLAUDE.md
+            // Remove generated CLAUDE.md (best-effort, don't block worktree removal)
             if (removeClaudeMd) {
-                const claudeMdPath = path.join(wt.path, "CLAUDE.md");
-                if (fs.existsSync(claudeMdPath)) {
-                    fs.unlinkSync(claudeMdPath);
+                try {
+                    const claudeMdPath = path.join(wt.path, "CLAUDE.md");
+                    if (fs.existsSync(claudeMdPath)) {
+                        fs.unlinkSync(claudeMdPath);
+                    }
+                } catch {
+                    // File locked or permission denied — proceed with worktree removal
                 }
             }
 
             await removeWorktree(repoRoot, wt.path, {
                 deleteBranch: deleteBranches,
                 force: true,
+                ...(protectedBranches ? { protectedBranches } : {}),
             });
             removed++;
         } catch (err) {
@@ -432,16 +442,51 @@ export function recommendMergeOrder(
     worktrees: WorktreeMergeInfo[],
     templateOrder?: string[]
 ): MergeOrderEntry[] {
-    // If template defines an order, use it
+    // If template defines an order, use it (but also include worktrees not in the template)
+    // Template mergeOrder contains role names (e.g. "backend", "frontend"),
+    // while branches are named "worktree-<team>-<role>". Match by suffix.
     if (templateOrder && templateOrder.length > 0) {
         const branchMap = new Map(worktrees.map((w) => [w.branch, w]));
-        return templateOrder
-            .filter((branch) => branchMap.has(branch))
-            .map((branch) => ({
-                branch,
-                worktreePath: branchMap.get(branch)!.path,
-                reason: "Template-defined order",
-            }));
+
+        // Build a role-to-worktree map: try exact branch match first,
+        // then fall back to matching branches that end with the role name
+        const findWorktreeForRole = (role: string): WorktreeMergeInfo | undefined => {
+            // Exact match (branch name IS the role)
+            if (branchMap.has(role)) return branchMap.get(role);
+            // Suffix match (branch ends with -<role>)
+            for (const wt of worktrees) {
+                if (wt.branch.endsWith(`-${role}`)) return wt;
+            }
+            return undefined;
+        };
+
+        const ordered: MergeOrderEntry[] = [];
+        const matchedBranches = new Set<string>();
+
+        for (const role of templateOrder) {
+            const wt = findWorktreeForRole(role);
+            if (wt) {
+                ordered.push({
+                    branch: wt.branch,
+                    worktreePath: wt.path,
+                    reason: "Template-defined order",
+                });
+                matchedBranches.add(wt.branch);
+            }
+        }
+
+        // Append any worktrees not matched by the template order
+        for (const wt of worktrees) {
+            if (!matchedBranches.has(wt.branch)) {
+                ordered.push({
+                    branch: wt.branch,
+                    worktreePath: wt.path,
+                    reason: "Not in template order — appended",
+                });
+            }
+        }
+
+        return ordered;
     }
 
     // Analyze dependencies: if worktree B changes files that import
@@ -684,14 +729,61 @@ async function gatherWorktreeMergeInfo(
         // Ignore
     }
 
-    // Check for uncommitted changes
+    // Check for uncommitted changes and include them in the report
     let hasUncommittedChanges = false;
+    let uncommittedFiles: string[] = [];
+    let uncommittedLinesAdded = 0;
+    let uncommittedLinesRemoved = 0;
     try {
         const status = await git(["status", "--porcelain"], worktreePath);
-        hasUncommittedChanges = status.trim().length > 0;
+        if (status.trim().length > 0) {
+            hasUncommittedChanges = true;
+            // Extract file paths from porcelain output
+            uncommittedFiles = status
+                .split("\n")
+                .filter(Boolean)
+                .map((line) => {
+                    // Porcelain format: XY filename  or  XY orig -> renamed
+                    const filePart = line.slice(3);
+                    // Handle renames (old -> new)
+                    const arrowIdx = filePart.indexOf(" -> ");
+                    return arrowIdx >= 0 ? filePart.slice(arrowIdx + 4) : filePart;
+                })
+                .filter(Boolean);
+
+            // Get lines added/removed for all uncommitted changes (staged + unstaged)
+            // `git diff HEAD` covers both staged and unstaged in one pass
+            try {
+                const uncommittedNumstat = await git(
+                    ["diff", "--numstat", "HEAD"],
+                    worktreePath
+                );
+                for (const line of uncommittedNumstat.split("\n")) {
+                    const [added, removed] = line.split("\t");
+                    if (added && removed && added !== "-") {
+                        uncommittedLinesAdded += parseInt(added, 10) || 0;
+                        uncommittedLinesRemoved += parseInt(removed, 10) || 0;
+                    }
+                }
+            } catch {
+                // Ignore — may fail if no HEAD commit
+            }
+        }
     } catch {
         // Ignore
     }
+
+    // Merge committed and uncommitted changed files (deduplicated)
+    const allChangedFiles = [...new Set([...changedFiles, ...uncommittedFiles])];
+
+    // Identify truly new uncommitted files (untracked or added but not in committed changes).
+    // Only files NOT already tracked by `git diff baseBranch...HEAD` are considered new.
+    const allNewFiles = [...new Set([
+        ...newFiles,
+        ...uncommittedFiles.filter(
+            (f) => !changedFiles.includes(f) && !newFiles.includes(f)
+        ),
+    ])];
 
     // Read REVIEW.md if exists
     let reviewFindings: string | undefined;
@@ -718,10 +810,10 @@ async function gatherWorktreeMergeInfo(
     return {
         path: worktreePath,
         branch,
-        changedFiles,
-        linesAdded,
-        linesRemoved,
-        newFiles,
+        changedFiles: allChangedFiles,
+        linesAdded: linesAdded + uncommittedLinesAdded,
+        linesRemoved: linesRemoved + uncommittedLinesRemoved,
+        newFiles: allNewFiles,
         diffStat,
         reviewFindings,
         handoffNotes,

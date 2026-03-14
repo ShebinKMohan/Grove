@@ -14,6 +14,7 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 import {
     TeamTemplate,
     detectOwnershipOverlaps,
@@ -70,6 +71,7 @@ export interface PreFlightResult {
 
 export class AgentOrchestrator implements vscode.Disposable {
     private teams = new Map<string, TeamState>();
+    private disposables: vscode.Disposable[] = [];
     private _onDidChangeTeams = new vscode.EventEmitter<void>();
     readonly onDidChangeTeams = this._onDidChangeTeams.event;
 
@@ -78,9 +80,11 @@ export class AgentOrchestrator implements vscode.Disposable {
         private readonly sessionTracker: SessionTracker
     ) {
         // Watch for session changes to update team status
-        this.sessionTracker.onDidChangeSessions(() => {
-            this.syncTeamStatuses();
-        });
+        this.disposables.push(
+            this.sessionTracker.onDidChangeSessions(() => {
+                this.syncTeamStatuses();
+            })
+        );
     }
 
     // ── Pre-Flight ───────────────────────────────────────────
@@ -195,11 +199,16 @@ export class AgentOrchestrator implements vscode.Disposable {
                 const branchName = `worktree-${teamName}-${agent.role}`;
 
                 try {
+                    const baseBranch = config.get<string>(
+                        "defaultBaseBranch",
+                        "main"
+                    );
                     const result = await createWorktree(
                         this.repoRoot,
                         branchName,
                         {
                             worktreeDir,
+                            startPoint: baseBranch,
                             autoGitignore: config.get<boolean>("autoGitignore", true),
                             autoInstallDeps: config.get<boolean>(
                                 "autoInstallDependencies",
@@ -257,7 +266,8 @@ export class AgentOrchestrator implements vscode.Disposable {
                 try {
                     const terminal = await launchClaude(
                         agentState.branch,
-                        agentState.worktreePath
+                        agentState.worktreePath,
+                        { skipSessionPrompt: true }
                     );
 
                     if (terminal) {
@@ -333,8 +343,10 @@ export class AgentOrchestrator implements vscode.Disposable {
         if (!team) return;
 
         for (const agent of team.agents) {
-            if (agent.sessionId && agent.status === "running") {
-                this.sessionTracker.stopSession(agent.sessionId);
+            if (agent.status === "running" || agent.status === "launching") {
+                if (agent.sessionId) {
+                    this.sessionTracker.stopSession(agent.sessionId);
+                }
                 agent.status = "stopped";
             }
         }
@@ -381,9 +393,15 @@ export class AgentOrchestrator implements vscode.Disposable {
         for (const agent of team.agents) {
             if (agent.worktreePath) {
                 try {
+                    const config = vscode.workspace.getConfiguration("worktreePilot");
+                    const protectedBranches = config.get<string[]>(
+                        "protectedBranches",
+                        ["main", "master", "develop", "production"]
+                    );
                     await removeWorktree(this.repoRoot, agent.worktreePath, {
                         deleteBranch: true,
                         force: true,
+                        protectedBranches,
                     });
                 } catch (err) {
                     logError(
@@ -395,30 +413,6 @@ export class AgentOrchestrator implements vscode.Disposable {
         }
 
         this.teams.delete(teamId);
-        this._onDidChangeTeams.fire();
-    }
-
-    /**
-     * Remove a completed/stopped team from the list.
-     */
-    removeTeam(teamId: string): void {
-        this.teams.delete(teamId);
-        this._onDidChangeTeams.fire();
-    }
-
-    /**
-     * Clear all completed teams.
-     */
-    clearCompletedTeams(): void {
-        for (const [id, team] of this.teams) {
-            if (
-                team.status === "completed" ||
-                team.status === "stopped" ||
-                team.status === "error"
-            ) {
-                this.teams.delete(id);
-            }
-        }
         this._onDidChangeTeams.fire();
     }
 
@@ -472,7 +466,7 @@ export class AgentOrchestrator implements vscode.Disposable {
      */
     private ensureAgentTeamsEnvVar(): void {
         const settingsPath = path.join(
-            process.env.HOME ?? "",
+            os.homedir(),
             ".claude",
             "settings.json"
         );
@@ -485,7 +479,15 @@ export class AgentOrchestrator implements vscode.Disposable {
                 ) as Record<string, unknown>;
             }
 
-            const env = (settings.env ?? {}) as Record<string, string>;
+            const rawEnv = settings.env;
+            if (rawEnv !== undefined && (typeof rawEnv !== "object" || rawEnv === null || Array.isArray(rawEnv))) {
+                logError(
+                    `~/.claude/settings.json has unexpected "env" type (${typeof rawEnv}). Skipping env var setup.`,
+                    undefined
+                );
+                return;
+            }
+            const env = (rawEnv ?? {}) as Record<string, string>;
             if (env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS !== "true") {
                 env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "true";
                 settings.env = env;
@@ -514,6 +516,9 @@ export class AgentOrchestrator implements vscode.Disposable {
     // ── Disposal ─────────────────────────────────────────────
 
     dispose(): void {
+        for (const d of this.disposables) {
+            d.dispose();
+        }
         this._onDidChangeTeams.dispose();
     }
 }

@@ -8,7 +8,16 @@ interface OverlapAlertsProps {
 export function OverlapAlerts({ overlaps }: OverlapAlertsProps) {
     const active = overlaps.filter((o) => !o.dismissed);
 
-    if (active.length === 0) return null;
+    if (active.length === 0) {
+        return (
+            <div className="empty-state">
+                <p>No file overlaps detected.</p>
+                <p className="text-muted">
+                    When multiple agents modify the same file, overlap alerts will appear here.
+                </p>
+            </div>
+        );
+    }
 
     const conflicts = active.filter((o) => o.severity === "conflict");
     const warnings = active.filter((o) => o.severity === "warning");
@@ -77,7 +86,7 @@ function OverlapItem({ overlap }: { overlap: OverlapAlert }) {
     const fileName = overlap.filePath.split("/").pop() ?? overlap.filePath;
 
     return (
-        <div className={`overlap-item overlap-severity-${overlap.severity}`}>
+        <div className="overlap-item">
             <span className={`overlap-icon overlap-${overlap.severity}`}>
                 {severityIcon}
             </span>

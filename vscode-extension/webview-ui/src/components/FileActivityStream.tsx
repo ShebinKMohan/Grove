@@ -1,20 +1,41 @@
+import { useMemo } from "react";
 import type { FileChange } from "../types";
 
 interface FileActivityStreamProps {
     changes: FileChange[];
 }
 
+interface GroupedChanges {
+    branch: string;
+    worktreePath: string;
+    changes: FileChange[];
+}
+
 export function FileActivityStream({ changes }: FileActivityStreamProps) {
+    const grouped = useMemo(() => groupByBranch(changes), [changes]);
+
     return (
         <div className="file-activity">
-            <h2 className="section-title">File Activity</h2>
+            <div className="activity-header">
+                <h2 className="section-title">File Activity</h2>
+                {changes.length > 0 && (
+                    <span className="activity-count text-muted">
+                        {changes.length} change{changes.length !== 1 ? "s" : ""}
+                    </span>
+                )}
+            </div>
 
             {changes.length === 0 ? (
-                <p className="text-muted">No file changes detected yet.</p>
+                <div className="empty-state">
+                    <p>No file changes detected yet.</p>
+                    <p className="text-muted">
+                        File changes across all active worktrees will appear here in real time.
+                    </p>
+                </div>
             ) : (
-                <div className="activity-list">
-                    {changes.map((change, i) => (
-                        <FileChangeItem key={`${change.timestamp}-${i}`} change={change} />
+                <div className="activity-groups">
+                    {grouped.map((group) => (
+                        <BranchGroup key={`${group.branch}-${group.worktreePath}`} group={group} />
                     ))}
                 </div>
             )}
@@ -22,36 +43,80 @@ export function FileActivityStream({ changes }: FileActivityStreamProps) {
     );
 }
 
-function FileChangeItem({ change }: { change: FileChange }) {
+function BranchGroup({ group }: { group: GroupedChanges }) {
+    const stats = useMemo(() => {
+        let created = 0, modified = 0, deleted = 0;
+        for (const c of group.changes) {
+            if (c.changeType === "created") created++;
+            else if (c.changeType === "modified") modified++;
+            else deleted++;
+        }
+        return { created, modified, deleted };
+    }, [group.changes]);
+
+    return (
+        <div className="activity-branch-group">
+            <div className="activity-branch-header">
+                <span className="activity-branch-name">{group.branch}</span>
+                <span className="activity-branch-stats">
+                    {stats.created > 0 && (
+                        <span className="stat-created">+{stats.created}</span>
+                    )}
+                    {stats.modified > 0 && (
+                        <span className="stat-modified">~{stats.modified}</span>
+                    )}
+                    {stats.deleted > 0 && (
+                        <span className="stat-deleted">-{stats.deleted}</span>
+                    )}
+                </span>
+            </div>
+            <div className="activity-branch-items">
+                {group.changes.map((change) => (
+                    <FileChangeRow key={`${group.branch}-${change.filePath}-${change.timestamp}`} change={change} />
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function FileChangeRow({ change }: { change: FileChange }) {
     const time = new Date(change.timestamp).toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
     });
 
-    const icon = change.changeType === "created"
-        ? "+"
-        : change.changeType === "deleted"
-            ? "-"
-            : "~";
-
-    const iconClass = `change-icon change-${change.changeType}`;
-
-    // Show just the filename, not full path
-    const fileName = change.filePath.split("/").pop() ?? change.filePath;
+    const label =
+        change.changeType === "created"
+            ? "Added"
+            : change.changeType === "deleted"
+              ? "Deleted"
+              : "Modified";
 
     return (
-        <div className="activity-item">
+        <div className="activity-row">
             <span className="activity-time">{time}</span>
-            <span className={iconClass}>{icon}</span>
-            <span className="activity-branch" title={change.branch}>
-                {change.branch.length > 20
-                    ? change.branch.slice(0, 20) + "..."
-                    : change.branch}
+            <span className={`activity-label activity-label-${change.changeType}`}>
+                {label}
             </span>
-            <span className="activity-file" title={change.filePath}>
-                {fileName}
+            <span className="activity-filepath" title={change.filePath}>
+                {change.filePath}
             </span>
         </div>
     );
+}
+
+function groupByBranch(changes: FileChange[]): GroupedChanges[] {
+    const map = new Map<string, GroupedChanges>();
+    for (const change of changes) {
+        // Key by both branch and worktreePath to avoid collisions
+        const key = `${change.branch}::${change.worktreePath}`;
+        let group = map.get(key);
+        if (!group) {
+            group = { branch: change.branch, worktreePath: change.worktreePath, changes: [] };
+            map.set(key, group);
+        }
+        group.changes.push(change);
+    }
+    return Array.from(map.values());
 }

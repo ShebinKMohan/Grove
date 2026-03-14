@@ -110,6 +110,34 @@ export class OverlapDetector implements vscode.Disposable {
         // Dispose old watchers
         this.disposeWatchers();
 
+        // Prune stale tracking data: remove entries for worktrees no longer in the set,
+        // but preserve overlap data for worktrees that are still active.
+        const activeWorktreePaths = new Set(worktrees.map((wt) => wt.path));
+
+        for (const [filePath, wtPaths] of this.modifiedFiles) {
+            for (const p of wtPaths) {
+                if (!activeWorktreePaths.has(p)) {
+                    wtPaths.delete(p);
+                }
+            }
+            if (wtPaths.size === 0) {
+                this.modifiedFiles.delete(filePath);
+            }
+        }
+
+        // Rebuild overlaps from pruned data
+        const prunedOverlapFiles = new Set<string>();
+        for (const [filePath, wtPaths] of this.modifiedFiles) {
+            if (wtPaths.size > 1) {
+                prunedOverlapFiles.add(filePath);
+            }
+        }
+        for (const filePath of this.overlaps.keys()) {
+            if (!prunedOverlapFiles.has(filePath)) {
+                this.overlaps.delete(filePath);
+            }
+        }
+
         // Update branch map
         this.worktreeBranches.clear();
         for (const wt of worktrees) {
@@ -120,9 +148,10 @@ export class OverlapDetector implements vscode.Disposable {
         for (const wt of worktrees) {
             if (!fs.existsSync(wt.path)) continue;
 
+            // Watch both root-level files and common source directories
             const pattern = new vscode.RelativePattern(
                 wt.path,
-                "{src,lib,app,test,tests,pkg,cmd,internal,config,public,assets,scripts}/**/*"
+                "{*,src/**/*,lib/**/*,app/**/*,test/**/*,tests/**/*,pkg/**/*,cmd/**/*,internal/**/*,config/**/*,public/**/*,assets/**/*,scripts/**/*}"
             );
 
             const watcher = vscode.workspace.createFileSystemWatcher(
@@ -153,10 +182,8 @@ export class OverlapDetector implements vscode.Disposable {
         worktrees: Array<{ path: string; branch: string }>,
         baseBranch: string = "main"
     ): Promise<void> {
-        // Clear existing data
-        this.modifiedFiles.clear();
-        this.overlaps.clear();
-
+        // Merge scan results into existing data instead of clearing,
+        // so real-time watcher detections are preserved.
         for (const wt of worktrees) {
             try {
                 const diffOutput = await git(
@@ -256,7 +283,8 @@ export class OverlapDetector implements vscode.Disposable {
     // ── Private ──────────────────────────────────────────────
 
     private onFileChange(uri: vscode.Uri, worktreePath: string): void {
-        const relativePath = path.relative(worktreePath, uri.fsPath);
+        // Normalize to forward slashes for consistent cross-platform comparison
+        const relativePath = path.relative(worktreePath, uri.fsPath).replace(/\\/g, "/");
 
         // Skip noise
         if (
@@ -307,10 +335,11 @@ export class OverlapDetector implements vscode.Disposable {
                         "View Overlaps",
                         "Dismiss"
                     ).then((action) => {
-                        if (action === "Dismiss") {
+                        if (action === "View Overlaps") {
+                            void vscode.commands.executeCommand("worktreePilot.openDashboard");
+                        } else if (action === "Dismiss") {
                             this.dismissOverlap(relativePath);
                         }
-                        // "View Overlaps" would open dashboard — handled by extension
                     });
                 }
             }

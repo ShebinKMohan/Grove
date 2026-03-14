@@ -13,8 +13,9 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import { SessionTracker } from "../../core/session-tracker";
+import { sanitizeRefName } from "../../utils/git";
 import { OverlapDetector } from "../../core/overlap-detector";
-import { listAllWorktrees, getWorktreeStatus } from "../../core/worktree-manager";
+import { listAllWorktrees } from "../../core/worktree-manager";
 import { openTerminal } from "../../utils/terminal";
 import { log, logError } from "../../utils/logger";
 
@@ -232,7 +233,7 @@ export class DashboardPanel implements vscode.Disposable {
                     "main"
                 );
                 terminal.sendText(
-                    `git diff ${baseBranch}...HEAD --stat`
+                    `git diff ${sanitizeRefName(baseBranch)}...HEAD --stat`
                 );
                 break;
             }
@@ -259,6 +260,7 @@ export class DashboardPanel implements vscode.Disposable {
     // ── State Sync ───────────────────────────────────────────
 
     private async sendUpdate(): Promise<void> {
+        if (this.disposed) return;
         try {
             const sessions = this.sessionTracker
                 .getAllSessions()
@@ -277,33 +279,15 @@ export class DashboardPanel implements vscode.Disposable {
                 );
 
             const rawWorktrees = await listAllWorktrees(this.repoRoot);
-            const worktrees: WebViewWorktreeInfo[] = [];
-
-            for (const wt of rawWorktrees) {
-                try {
-                    const status = await getWorktreeStatus(wt.path);
-                    worktrees.push({
-                        path: wt.path,
-                        branch: wt.branch,
-                        commit: wt.commit.slice(0, 7),
-                        isMain: wt.isMain,
-                        statusSummary:
-                            status.modified + status.staged + status.untracked + status.conflicts > 0
-                                ? "changes"
-                                : "clean",
-                        status,
-                    });
-                } catch {
-                    worktrees.push({
-                        path: wt.path,
-                        branch: wt.branch,
-                        commit: wt.commit.slice(0, 7),
-                        isMain: wt.isMain,
-                        statusSummary: "unknown",
-                        status: { modified: 0, staged: 0, untracked: 0, conflicts: 0 },
-                    });
-                }
-            }
+            if (this.disposed) return; // Panel may have been disposed during await
+            const worktrees: WebViewWorktreeInfo[] = rawWorktrees.map((wt) => ({
+                path: wt.path,
+                branch: wt.branch,
+                commit: wt.commit.slice(0, 7),
+                isMain: wt.isMain,
+                statusSummary: wt.statusSummary,
+                status: wt.status,
+            }));
 
             const overlaps = this.overlapDetector?.getOverlapAlerts() ?? [];
 
@@ -327,6 +311,12 @@ export class DashboardPanel implements vscode.Disposable {
         }
         this.fileWatchers = [];
 
+        // Clear stale debounce timers from previous sessions
+        for (const timer of this.fileChangeDebounce.values()) {
+            clearTimeout(timer);
+        }
+        this.fileChangeDebounce.clear();
+
         // Create watchers for each active session's worktree
         const activeSessions = this.sessionTracker.getActiveSessions();
         const config = vscode.workspace.getConfiguration("worktreePilot");
@@ -335,11 +325,11 @@ export class DashboardPanel implements vscode.Disposable {
         for (const session of activeSessions) {
             if (!fs.existsSync(session.worktreePath)) continue;
 
-            // Scoped glob — excludes node_modules, .git, dist, __pycache__
-            // to avoid overwhelming VS Code's file watcher
+            // Watch root-level files and common source directories.
+            // Excludes node_modules, .git, dist, __pycache__ by not listing them.
             const pattern = new vscode.RelativePattern(
                 session.worktreePath,
-                "{src,lib,app,test,tests,pkg,cmd,internal}/**/*"
+                "{*,src/**/*,lib/**/*,app/**/*,test/**/*,tests/**/*,pkg/**/*,cmd/**/*,internal/**/*,config/**/*,public/**/*,assets/**/*,scripts/**/*}"
             );
 
             const watcher = vscode.workspace.createFileSystemWatcher(
@@ -353,8 +343,8 @@ export class DashboardPanel implements vscode.Disposable {
                 uri: vscode.Uri,
                 changeType: "created" | "modified" | "deleted"
             ): void => {
-                // Skip .git directory changes
-                const relativePath = path.relative(session.worktreePath, uri.fsPath);
+                // Normalize to forward slashes for cross-platform consistency
+                const relativePath = path.relative(session.worktreePath, uri.fsPath).replace(/\\/g, "/");
                 if (relativePath.startsWith(".git")) return;
                 // Skip node_modules, __pycache__, etc.
                 if (
@@ -373,6 +363,7 @@ export class DashboardPanel implements vscode.Disposable {
                     key,
                     setTimeout(() => {
                         this.fileChangeDebounce.delete(key);
+                        if (this.disposed) return;
                         void this.panel.webview.postMessage({
                             type: "file-change",
                             change: {
@@ -397,7 +388,12 @@ export class DashboardPanel implements vscode.Disposable {
 
     // ── Disposal ─────────────────────────────────────────────
 
+    private disposed = false;
+
     dispose(): void {
+        if (this.disposed) return;
+        this.disposed = true;
+
         DashboardPanel.currentPanel = undefined;
 
         if (this.refreshInterval) {
@@ -417,7 +413,9 @@ export class DashboardPanel implements vscode.Disposable {
             d.dispose();
         }
 
-        this.panel.dispose();
+        // Note: do NOT call this.panel.dispose() here.
+        // dispose() is called from the panel's onDidDispose callback,
+        // meaning the panel is already disposed by VS Code.
     }
 }
 

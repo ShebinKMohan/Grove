@@ -105,10 +105,11 @@ export function buildClaudeMdContent(options: ClaudeMdOptions): string {
 
     // List other agents' ownership for reference
     const otherAgents = template.agents.filter((a) => a.role !== agent.role);
-    if (otherAgents.length > 0) {
+    const otherOwnedAgents = otherAgents.filter((a) => a.ownership.length > 0);
+    if (otherOwnedAgents.length > 0) {
         sections.push("**Do NOT modify** files owned by other agents:");
         sections.push("");
-        for (const other of otherAgents) {
+        for (const other of otherOwnedAgents) {
             const patterns = other.ownership.map((p) => `\`${p}\``).join(", ");
             sections.push(`- **${other.displayName}** (${other.role}): ${patterns}`);
         }

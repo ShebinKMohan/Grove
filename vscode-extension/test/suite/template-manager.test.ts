@@ -6,7 +6,6 @@ import {
     validateTemplate,
     detectOwnershipOverlaps,
     loadAllTemplates,
-    saveTemplate,
     type TeamTemplate,
 } from "../../src/core/template-manager";
 
@@ -206,44 +205,4 @@ describe("template-manager", () => {
         });
     });
 
-    describe("saveTemplate()", () => {
-        it("saves a template to the project directory", () => {
-            const tmpDir = fs.realpathSync(
-                fs.mkdtempSync(path.join(os.tmpdir(), "wtp-save-"))
-            );
-
-            try {
-                const template: TeamTemplate = {
-                    name: "My Custom Team",
-                    description: "Custom",
-                    agents: [
-                        {
-                            role: "dev",
-                            displayName: "Dev",
-                            ownership: [],
-                            prompt: "Code",
-                            readOnly: false,
-                        },
-                    ],
-                    mergeOrder: [],
-                    estimatedTokens: "50K",
-                };
-
-                saveTemplate(tmpDir, template);
-
-                const saved = path.join(
-                    tmpDir,
-                    ".worktreepilot",
-                    "templates",
-                    "my-custom-team.json"
-                );
-                assert.ok(fs.existsSync(saved));
-
-                const content = JSON.parse(fs.readFileSync(saved, "utf-8"));
-                assert.strictEqual(content.name, "My Custom Team");
-            } finally {
-                fs.rmSync(tmpDir, { recursive: true, force: true });
-            }
-        });
-    });
 });

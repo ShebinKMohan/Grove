@@ -16,9 +16,11 @@ let cachedClaudePath: string | undefined;
 function resolveClaudePath(): string {
     if (!cachedClaudePath) {
         try {
-            cachedClaudePath = execFileSync("which", ["claude"], {
+            const cmd = process.platform === "win32" ? "where" : "which";
+            cachedClaudePath = execFileSync(cmd, ["claude"], {
                 encoding: "utf-8",
-            }).trim();
+                timeout: 5000,
+            }).trim().split("\n")[0]; // `where` on Windows can return multiple lines
         } catch {
             cachedClaudePath = "claude";
         }
@@ -77,14 +79,15 @@ export function hasExistingClaudeSession(cwd: string): boolean {
  */
 export async function launchClaude(
     branchName: string,
-    cwd: string
+    cwd: string,
+    options?: { skipSessionPrompt?: boolean }
 ): Promise<vscode.Terminal | undefined> {
     const claudePath = resolveClaudePath();
     let claudeArgs: string[] = [];
 
     log(`Launch Claude: branch="${branchName}" cwd="${cwd}"`);
 
-    if (hasExistingClaudeSession(cwd)) {
+    if (!options?.skipSessionPrompt && hasExistingClaudeSession(cwd)) {
         const choice = await vscode.window.showQuickPick(
             [
                 {
@@ -123,28 +126,45 @@ export async function launchClaude(
         : claudePath;
     const execCmd = [quotedPath, ...claudeArgs].join(" ");
 
-    // Strategy: clean shell → sleep to drain IDE injections → exec claude
-    const shellCmd = [
-        "sleep 2",
-        "while read -t 0.5 -k 1 c 2>/dev/null; do :; done",
-        `exec ${execCmd}`,
-    ].join("; ");
+    let terminalOptions: vscode.TerminalOptions;
 
-    const terminal = vscode.window.createTerminal({
-        name: `Claude: ${branchName}`,
-        cwd,
-        shellPath: "/bin/zsh",
-        shellArgs: ["--no-rcs", "--no-globalrcs", "-c", shellCmd],
-        strictEnv: true,
-        env: {
-            PATH: process.env["PATH"] || "/usr/local/bin:/usr/bin:/bin",
-            HOME: process.env["HOME"] || "",
-            USER: process.env["USER"] || "",
-            SHELL: "/bin/zsh",
-            TERM: "xterm-256color",
-            LANG: process.env["LANG"] || "en_US.UTF-8",
-        },
-    });
+    if (process.platform === "win32") {
+        // Windows: use PowerShell, run claude directly
+        terminalOptions = {
+            name: `Claude: ${branchName}`,
+            cwd,
+            shellPath: "powershell.exe",
+            shellArgs: ["-NoProfile", "-Command", `& ${execCmd}`],
+        };
+    } else {
+        // macOS/Linux: clean shell → drain IDE injections → exec claude
+        const shellPath = fs.existsSync("/bin/zsh") ? "/bin/zsh" : "/bin/bash";
+        const shellFlags = shellPath.endsWith("zsh")
+            ? ["--no-rcs", "--no-globalrcs"]
+            : ["--norc", "--noprofile"];
+        const drainCmd = shellPath.endsWith("zsh")
+            ? "while read -t 0.5 -k 1 c 2>/dev/null; do :; done"
+            : "read -t 0.5 -n 10000 discard 2>/dev/null || true";
+        const shellCmd = [
+            "sleep 2",
+            drainCmd,
+            `exec ${execCmd}`,
+        ].join("; ");
+
+        terminalOptions = {
+            name: `Claude: ${branchName}`,
+            cwd,
+            shellPath,
+            shellArgs: [...shellFlags, "-c", shellCmd],
+            // Do NOT use strictEnv — it strips critical env vars like
+            // ANTHROPIC_API_KEY, SSH_AUTH_SOCK, proxy settings, etc.
+            env: {
+                TERM: "xterm-256color",
+            },
+        };
+    }
+
+    const terminal = vscode.window.createTerminal(terminalOptions);
     terminal.show();
     return terminal;
 }

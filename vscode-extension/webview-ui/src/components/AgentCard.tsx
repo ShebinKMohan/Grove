@@ -1,3 +1,4 @@
+import { useEffect, useState, useMemo } from "react";
 import type { SessionInfo } from "../types";
 import vscode from "../vscode";
 
@@ -8,7 +9,46 @@ interface AgentCardProps {
 export function AgentCard({ session }: AgentCardProps) {
     const isActive =
         session.status === "running" || session.status === "idle";
-    const elapsed = formatElapsed(session.startedAt, session.endedAt);
+    const elapsed = useLiveElapsed(session.startedAt, session.endedAt, isActive);
+
+    const startedLabel = useMemo(() => {
+        return new Date(session.startedAt).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+        });
+    }, [session.startedAt]);
+
+    const endedLabel = useMemo(() => {
+        if (!session.endedAt) return null;
+        return new Date(session.endedAt).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+        });
+    }, [session.endedAt]);
+
+    const fileSummary = useMemo(() => {
+        if (session.modifiedFiles.length === 0) return null;
+        const dirs = new Set<string>();
+        for (const f of session.modifiedFiles) {
+            const parts = f.split("/");
+            if (parts.length > 1) {
+                dirs.add(parts.slice(0, -1).join("/"));
+            }
+        }
+        return {
+            count: session.modifiedFiles.length,
+            dirs: dirs.size,
+        };
+    }, [session.modifiedFiles]);
+
+    const statusLabel =
+        session.status === "running"
+            ? "Running"
+            : session.status === "idle"
+              ? "Waiting"
+              : session.status === "completed"
+                ? "Done"
+                : "Error";
 
     return (
         <div className={`card card-${session.status}`}>
@@ -16,6 +56,9 @@ export function AgentCard({ session }: AgentCardProps) {
                 <div className="card-title">
                     <span className={`status-dot status-${session.status}`} />
                     <span className="branch-name">{session.branch}</span>
+                    <span className={`status-label status-label-${session.status}`}>
+                        {statusLabel}
+                    </span>
                 </div>
                 <span className="card-elapsed">{elapsed}</span>
             </div>
@@ -24,21 +67,30 @@ export function AgentCard({ session }: AgentCardProps) {
                 <p className="card-task">{session.taskDescription}</p>
             )}
 
+            <div className="card-meta">
+                <span className="card-meta-item" title="Started at">
+                    {startedLabel}
+                    {endedLabel && ` \u2192 ${endedLabel}`}
+                </span>
+                {fileSummary && (
+                    <span className="files-badge">
+                        {fileSummary.count} file{fileSummary.count !== 1 ? "s" : ""}
+                        {fileSummary.dirs > 0 && ` across ${fileSummary.dirs} dir${fileSummary.dirs !== 1 ? "s" : ""}`}
+                    </span>
+                )}
+            </div>
+
             {session.modifiedFiles.length > 0 && (
                 <div className="card-files">
-                    <span className="files-count">
-                        {session.modifiedFiles.length} file
-                        {session.modifiedFiles.length !== 1 ? "s" : ""} changed
-                    </span>
                     <ul className="files-list">
-                        {session.modifiedFiles.slice(0, 5).map((f) => (
+                        {session.modifiedFiles.slice(0, 8).map((f) => (
                             <li key={f} className="file-item">
                                 {f}
                             </li>
                         ))}
-                        {session.modifiedFiles.length > 5 && (
+                        {session.modifiedFiles.length > 8 && (
                             <li className="file-item text-muted">
-                                +{session.modifiedFiles.length - 5} more
+                                +{session.modifiedFiles.length - 8} more
                             </li>
                         )}
                     </ul>
@@ -57,10 +109,10 @@ export function AgentCard({ session }: AgentCardProps) {
                                 })
                             }
                         >
-                            Terminal
+                            Open Terminal
                         </button>
                         <button
-                            className="btn btn-small"
+                            className="btn btn-small btn-secondary"
                             onClick={() =>
                                 vscode.postMessage({
                                     type: "view-diff",
@@ -69,7 +121,7 @@ export function AgentCard({ session }: AgentCardProps) {
                                 })
                             }
                         >
-                            Diff
+                            View Changes
                         </button>
                         <button
                             className="btn btn-small btn-danger"
@@ -86,7 +138,7 @@ export function AgentCard({ session }: AgentCardProps) {
                 )}
                 {!isActive && (
                     <button
-                        className="btn btn-small"
+                        className="btn btn-small btn-secondary"
                         onClick={() =>
                             vscode.postMessage({
                                 type: "view-diff",
@@ -95,13 +147,13 @@ export function AgentCard({ session }: AgentCardProps) {
                             })
                         }
                     >
-                        View Diff
+                        View Changes
                     </button>
                 )}
             </div>
 
             {session.status === "error" && session.exitCode !== undefined && (
-                <div className="card-error">
+                <div className="card-error-message">
                     Exited with code {session.exitCode}
                 </div>
             )}
@@ -109,17 +161,26 @@ export function AgentCard({ session }: AgentCardProps) {
     );
 }
 
-function formatElapsed(
+function useLiveElapsed(
     startedAt: string,
-    endedAt: string | undefined
+    endedAt: string | undefined,
+    isActive: boolean
 ): string {
+    const [now, setNow] = useState(Date.now());
+
+    useEffect(() => {
+        if (!isActive) return;
+        const id = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(id);
+    }, [isActive, startedAt, endedAt]);
+
     const start = new Date(startedAt).getTime();
-    const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+    const end = endedAt ? new Date(endedAt).getTime() : now;
     const ms = end - start;
     const seconds = Math.floor(ms / 1000);
     if (seconds < 60) return `${seconds}s`;
     const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m`;
+    if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
     const hours = Math.floor(minutes / 60);
     const rem = minutes % 60;
     return `${hours}h ${rem}m`;

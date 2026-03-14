@@ -60,6 +60,21 @@ const GLOBAL_TEMPLATE_DIR = path.join(
     "templates"
 );
 
+/**
+ * Root path of the extension installation directory.
+ * Must be set via `initTemplateManager()` before loading built-in templates.
+ * When unset, falls back to a `__dirname`-relative guess (works in dev, not in VSIX).
+ */
+let extensionRoot: string = path.join(__dirname, "..", "..");
+
+/**
+ * Initialise the template manager with the extension's installation path.
+ * Call this once during extension activation (pass `context.extensionPath`).
+ */
+export function initTemplateManager(extensionPath: string): void {
+    extensionRoot = extensionPath;
+}
+
 // ────────────────────────────────────────────
 // Template Loading
 // ────────────────────────────────────────────
@@ -74,7 +89,7 @@ export function loadAllTemplates(
     const templates = new Map<string, TeamTemplate>();
 
     // 1. Load built-in templates (shipped with extension)
-    const builtinDir = path.join(__dirname, "..", "..", "templates");
+    const builtinDir = path.join(extensionRoot, "templates");
     loadTemplatesFromDir(builtinDir, templates);
 
     // 2. Load global templates (override built-ins)
@@ -97,24 +112,6 @@ export function loadTemplate(
 ): TeamTemplate | undefined {
     const all = loadAllTemplates(repoRoot, templateDir);
     return all.find((t) => t.name === name);
-}
-
-/**
- * Save a template to the project's template directory.
- */
-export function saveTemplate(
-    repoRoot: string,
-    template: TeamTemplate,
-    templateDir: string = ".worktreepilot/templates"
-): void {
-    const dir = path.join(repoRoot, templateDir);
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-    }
-
-    const filename = slugify(template.name) + ".json";
-    const filepath = path.join(dir, filename);
-    fs.writeFileSync(filepath, JSON.stringify(template, null, 2) + "\n");
 }
 
 /**
@@ -145,7 +142,7 @@ export function listTemplateNames(
     }
 
     // Built-in templates
-    const builtinDir = path.join(__dirname, "..", "..", "templates");
+    const builtinDir = path.join(extensionRoot, "templates");
     for (const t of readTemplatesFromDir(builtinDir)) {
         if (!seen.has(t.name)) {
             seen.add(t.name);
@@ -210,6 +207,10 @@ export function validateTemplate(
 
         if (typeof agent.prompt !== "string") {
             errors.push({ field: `${prefix}.prompt`, message: "Prompt is required" });
+        }
+
+        if (agent.readOnly !== undefined && typeof agent.readOnly !== "boolean") {
+            errors.push({ field: `${prefix}.readOnly`, message: "readOnly must be a boolean" });
         }
     }
 
@@ -341,11 +342,4 @@ function readTemplatesFromDir(dir: string): TeamTemplate[] {
     }
 
     return templates;
-}
-
-function slugify(name: string): string {
-    return name
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-|-$/g, "");
 }

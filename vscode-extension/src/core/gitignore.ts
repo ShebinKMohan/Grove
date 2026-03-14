@@ -20,12 +20,12 @@ export function ensureGitignored(
     const resolved = path.resolve(worktreePath);
     const resolvedRoot = path.resolve(repoRoot);
 
-    if (!resolved.startsWith(resolvedRoot)) {
+    if (!resolved.startsWith(resolvedRoot + path.sep) && resolved !== resolvedRoot) {
         // Worktree is outside the repo — nothing to gitignore
         return false;
     }
 
-    const relative = path.relative(resolvedRoot, resolved);
+    const relative = path.relative(resolvedRoot, resolved).replace(/\\/g, "/");
     const pattern = `/${relative}/`;
 
     if (fs.existsSync(gitignorePath)) {

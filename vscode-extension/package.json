@@ -157,6 +157,12 @@
         "title": "Execute Merge Sequence",
         "category": "WorkTree Pilot",
         "icon": "$(merge)"
+      },
+      {
+        "command": "worktreePilot.quickMenu",
+        "title": "Quick Menu",
+        "category": "WorkTree Pilot",
+        "icon": "$(layers)"
       }
     ],
     "viewsContainers": {
@@ -171,63 +177,51 @@
     "views": {
       "worktreePilot": [
         {
-          "id": "worktreePilot.worktrees",
-          "name": "Worktrees",
+          "id": "worktreePilot.explorer",
+          "name": "WorkTree Pilot",
           "contextualTitle": "WorkTree Pilot",
           "visibility": "visible"
         },
         {
-          "id": "worktreePilot.sessions",
-          "name": "Active Sessions",
-          "visibility": "collapsed"
-        },
-        {
-          "id": "worktreePilot.teams",
-          "name": "Agent Teams",
+          "id": "worktreePilot.completed",
+          "name": "Completed",
+          "contextualTitle": "Completed Sessions & Teams",
           "visibility": "collapsed"
         }
       ]
     },
     "viewsWelcome": [
       {
-        "view": "worktreePilot.worktrees",
-        "contents": "No worktrees found.\n\nCreate a worktree to start working on multiple branches in parallel.\n\n[Create Worktree](command:worktreePilot.createWorktree)"
-      },
-      {
-        "view": "worktreePilot.sessions",
-        "contents": "No active Claude Code sessions.\n\nLaunch a session from a worktree to get started."
-      },
-      {
-        "view": "worktreePilot.teams",
-        "contents": "No agent teams running.\n\nLaunch a team to orchestrate multiple Claude Code agents in parallel.\n\n[Launch Agent Team](command:worktreePilot.launchTeam)"
+        "view": "worktreePilot.explorer",
+        "contents": "Welcome to WorkTree Pilot!\n\nGet started with parallel AI development:\n\n[Create Worktree](command:worktreePilot.createWorktree)\n[Launch Agent Team](command:worktreePilot.launchTeam)\n[Open Dashboard](command:worktreePilot.openDashboard)"
       }
     ],
     "menus": {
       "view/title": [
         {
           "command": "worktreePilot.createWorktree",
-          "when": "view == worktreePilot.worktrees",
-          "group": "navigation"
-        },
-        {
-          "command": "worktreePilot.refreshSidebar",
-          "when": "view == worktreePilot.worktrees",
-          "group": "navigation"
-        },
-        {
-          "command": "worktreePilot.stopAllSessions",
-          "when": "view == worktreePilot.sessions",
-          "group": "navigation"
-        },
-        {
-          "command": "worktreePilot.clearCompletedSessions",
-          "when": "view == worktreePilot.sessions",
-          "group": "navigation"
+          "when": "view == worktreePilot.explorer",
+          "group": "navigation@1"
         },
         {
           "command": "worktreePilot.launchTeam",
-          "when": "view == worktreePilot.teams",
-          "group": "navigation"
+          "when": "view == worktreePilot.explorer",
+          "group": "navigation@2"
+        },
+        {
+          "command": "worktreePilot.openDashboard",
+          "when": "view == worktreePilot.explorer",
+          "group": "navigation@3"
+        },
+        {
+          "command": "worktreePilot.clearCompletedSessions",
+          "when": "view == worktreePilot.completed",
+          "group": "navigation@1"
+        },
+        {
+          "command": "worktreePilot.refreshSidebar",
+          "when": "view == worktreePilot.explorer",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -238,12 +232,12 @@
         },
         {
           "command": "worktreePilot.openInTerminal",
-          "when": "viewItem == worktree || viewItem == worktree-main",
+          "when": "viewItem == worktree || viewItem == worktree-main || viewItem == worktree-with-session",
           "group": "inline@2"
         },
         {
           "command": "worktreePilot.openInNewWindow",
-          "when": "viewItem == worktree || viewItem == worktree-main",
+          "when": "viewItem == worktree || viewItem == worktree-main || viewItem == worktree-with-session",
           "group": "1_open"
         },
         {
@@ -253,12 +247,12 @@
         },
         {
           "command": "worktreePilot.viewDiff",
-          "when": "viewItem == worktree || viewItem == worktree-main",
+          "when": "viewItem == worktree || viewItem == worktree-main || viewItem == worktree-with-session",
           "group": "2_inspect"
         },
         {
           "command": "worktreePilot.deleteWorktree",
-          "when": "viewItem == worktree",
+          "when": "viewItem == worktree || viewItem == worktree-with-session",
           "group": "3_manage"
         },
         {
@@ -272,19 +266,9 @@
           "group": "inline@2"
         },
         {
-          "command": "worktreePilot.focusSession",
-          "when": "viewItem == session-active",
-          "group": "1_session"
-        },
-        {
           "command": "worktreePilot.setTaskDescription",
           "when": "viewItem == session-active || viewItem == session-completed",
-          "group": "2_session"
-        },
-        {
-          "command": "worktreePilot.stopSession",
-          "when": "viewItem == session-active",
-          "group": "3_session"
+          "group": "1_session"
         },
         {
           "command": "worktreePilot.stopTeam",
@@ -317,14 +301,9 @@
           "group": "inline@2"
         },
         {
-          "command": "worktreePilot.focusAgent",
-          "when": "viewItem == agent-active",
-          "group": "1_agent"
-        },
-        {
-          "command": "worktreePilot.stopAgent",
-          "when": "viewItem == agent-active",
-          "group": "2_agent"
+          "command": "worktreePilot.cleanupTeam",
+          "when": "viewItem == team-completed && view == worktreePilot.completed",
+          "group": "inline@1"
         }
       ],
       "commandPalette": [
@@ -476,13 +455,14 @@
     }
   },
   "scripts": {
+    "postinstall": "cd webview-ui && npm install",
     "compile": "npm run build:webview && tsc -p ./",
     "compile:ext": "tsc -p ./",
     "build:webview": "cd webview-ui && npm run build",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",
-    "pretest": "npm run compile",
-    "test": "node ./out/test/runTest.js",
+    "test": "npx vitest run",
+    "test:integration": "npm run compile && node ./out/test/runTest.js",
     "package": "npm run compile && npx @vscode/vsce package"
   },
   "devDependencies": {
@@ -495,6 +475,7 @@
     "@vscode/vsce": "^3.7.1",
     "eslint": "^8.56.0",
     "mocha": "^10.2.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.0"
   }
 }

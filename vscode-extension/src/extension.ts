@@ -6,23 +6,20 @@
  */
 
 import * as vscode from "vscode";
-import { getRepoRoot, getCurrentBranch, listLocalBranches } from "./utils/git";
+import { getRepoRoot, getCurrentBranch, git, gitWrite, sanitizeRefName } from "./utils/git";
+import { showAutoInfo, showAutoWarning } from "./ui/notifications";
 import {
-    WorktreeTreeProvider,
-    WorktreeTreeItem,
-} from "./ui/sidebar/worktree-tree-provider";
-import {
-    SessionTreeProvider,
-    SessionTreeItem,
-} from "./ui/sidebar/session-tree-provider";
-import {
-    TeamTreeProvider,
-    AgentTreeItem,
-} from "./ui/sidebar/team-tree-provider";
+    UnifiedTreeProvider,
+    CompletedTreeProvider,
+    WorktreeItem,
+    SessionItem,
+    AgentItem,
+} from "./ui/sidebar/unified-tree-provider";
 import { SessionTracker } from "./core/session-tracker";
 import { AgentOrchestrator } from "./core/agent-orchestrator";
 import { OverlapDetector } from "./core/overlap-detector";
 import {
+    initTemplateManager,
     listTemplateNames,
     loadTemplate,
 } from "./core/template-manager";
@@ -31,8 +28,6 @@ import {
     removeWorktree,
     listAllWorktrees,
     validateBranchName,
-    computeWorktreePath,
-    BRANCH_PREFIXES,
 } from "./core/worktree-manager";
 import { openTerminal, openInNewWindow, launchClaude } from "./utils/terminal";
 import { DashboardPanel } from "./ui/webview/dashboard-panel";
@@ -40,6 +35,7 @@ import {
     generateMergeReport,
     executeMergeStep,
     abortMerge,
+    checkRepoState,
     runTests,
     detectTestCommand,
     postMergeCleanup,
@@ -48,10 +44,36 @@ import {
 import { WorktreePilotError } from "./utils/errors";
 import { log, logError, disposeLogger } from "./utils/logger";
 
+/** Read the user-configured protected branches list from VS Code settings. */
+function getProtectedBranches(): string[] {
+    const config = vscode.workspace.getConfiguration("worktreePilot");
+    return config.get<string[]>("protectedBranches", ["main", "master", "develop", "production"]);
+}
+
 export async function activate(
     context: vscode.ExtensionContext
 ): Promise<void> {
     log("WorkTree Pilot activating...");
+    initTemplateManager(context.extensionPath);
+
+    // ── Tree Providers (register unconditionally) ─────────
+    // Views declared in package.json must always be registered,
+    // even when the workspace is not a git repo.
+
+    const unifiedProvider = new UnifiedTreeProvider();
+    const completedProvider = new CompletedTreeProvider();
+
+    const explorerView = vscode.window.createTreeView(
+        "worktreePilot.explorer",
+        { treeDataProvider: unifiedProvider, showCollapseAll: true }
+    );
+
+    const completedView = vscode.window.createTreeView(
+        "worktreePilot.completed",
+        { treeDataProvider: completedProvider, showCollapseAll: true }
+    );
+
+    context.subscriptions.push(explorerView, completedView);
 
     // Find workspace git repo
     const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -90,7 +112,7 @@ export async function activate(
     );
 
     // Update overlap watchers when sessions change
-    sessionTracker.onDidChangeSessions(() => {
+    context.subscriptions.push(sessionTracker.onDidChangeSessions(() => {
         const activeSessions = sessionTracker.getActiveSessions();
         if (activeSessions.length > 1) {
             overlapDetector.watchWorktrees(
@@ -102,31 +124,15 @@ export async function activate(
         } else {
             overlapDetector.reset();
         }
-    });
+    }));
 
-    // ── Tree Providers ──────────────────────────────────────
+    // Wire up tree providers with data sources
+    unifiedProvider.setRepoRoot(repoRoot);
+    unifiedProvider.setTracker(sessionTracker);
+    unifiedProvider.setOrchestrator(orchestrator);
 
-    const worktreeTreeProvider = new WorktreeTreeProvider();
-    worktreeTreeProvider.setRepoRoot(repoRoot);
-
-    const sessionTreeProvider = new SessionTreeProvider();
-    sessionTreeProvider.setTracker(sessionTracker);
-
-    const teamTreeProvider = new TeamTreeProvider();
-    teamTreeProvider.setOrchestrator(orchestrator);
-
-    const worktreeView = vscode.window.createTreeView(
-        "worktreePilot.worktrees",
-        { treeDataProvider: worktreeTreeProvider, showCollapseAll: true }
-    );
-    const sessionView = vscode.window.createTreeView(
-        "worktreePilot.sessions",
-        { treeDataProvider: sessionTreeProvider, showCollapseAll: true }
-    );
-    const teamView = vscode.window.createTreeView(
-        "worktreePilot.teams",
-        { treeDataProvider: teamTreeProvider, showCollapseAll: true }
-    );
+    completedProvider.setTracker(sessionTracker);
+    completedProvider.setOrchestrator(orchestrator);
 
     // ── Status Bar ──────────────────────────────────────────
 
@@ -134,7 +140,7 @@ export async function activate(
         vscode.StatusBarAlignment.Left,
         100
     );
-    statusBarItem.command = "worktreePilot.refreshSidebar";
+    statusBarItem.command = "worktreePilot.quickMenu";
 
     async function updateStatusBar(): Promise<void> {
         const config = vscode.workspace.getConfiguration("worktreePilot");
@@ -156,7 +162,7 @@ export async function activate(
                 (activeSessionCount > 0
                     ? `, ${activeSessionCount} active session(s)`
                     : "") +
-                "\nClick to refresh";
+                "\nClick for quick menu";
             statusBarItem.show();
         } catch {
             statusBarItem.hide();
@@ -165,118 +171,57 @@ export async function activate(
 
     // ── Refresh Helper ──────────────────────────────────────
 
+    let isRefreshing = false;
     const refreshAll = (): void => {
-        worktreeTreeProvider.refresh();
-        sessionTreeProvider.refresh();
-        void updateStatusBar();
+        if (isRefreshing) return;
+        isRefreshing = true;
+        try {
+            unifiedProvider.refresh();
+            completedProvider.refresh();
+            void updateStatusBar();
+        } finally {
+            isRefreshing = false;
+        }
     };
 
     // Update status bar when sessions change
-    sessionTracker.onDidChangeSessions(() => void updateStatusBar());
+    context.subscriptions.push(
+        sessionTracker.onDidChangeSessions(() => void updateStatusBar())
+    );
 
     // ── Commands ────────────────────────────────────────────
 
-    // Create Worktree
+    // Create Worktree (streamlined single-input flow)
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "worktreePilot.createWorktree",
             async () => {
-                // 1. Select prefix
-                const prefixItems = BRANCH_PREFIXES.map((p) => ({
-                    label: p.replace(/\/$/, ""),
-                    description: `${p}<name>`,
-                    value: p,
-                }));
-                const prefixPick = await vscode.window.showQuickPick(
-                    prefixItems,
-                    {
-                        placeHolder: "Select branch type",
-                        title: "WorkTree Pilot: Branch Prefix",
-                    }
-                );
-                if (!prefixPick) return;
-                const prefix = prefixPick.value;
-
-                // 2. Input branch name
-                const nameInput = await vscode.window.showInputBox({
-                    prompt: `Branch name (${prefix})`,
-                    placeHolder: "e.g., add-user-auth",
-                    title: "WorkTree Pilot: Branch Name",
+                // Single input: branch name (e.g. feature/add-login)
+                const branchName = await vscode.window.showInputBox({
+                    prompt: "Branch name for the new worktree",
+                    placeHolder:
+                        "Branch name, e.g. feature/add-login or fix/bug-123",
+                    title: "WorkTree Pilot: Create Worktree",
                     validateInput: (value) => {
                         if (!value) return "Branch name cannot be empty.";
-                        return validateBranchName(`${prefix}${value}`);
+                        return validateBranchName(value);
                     },
                 });
-                if (!nameInput) return;
-                const branchName = `${prefix}${nameInput}`;
+                if (!branchName) return;
 
-                // 3. Select source branch
-                const branches = await listLocalBranches(repoRoot);
-                const currentBranch = await getCurrentBranch(repoRoot);
-                const sourceItems: vscode.QuickPickItem[] = [
-                    {
-                        label: "$(git-commit) Current HEAD",
-                        description: `(${currentBranch})`,
-                        detail: "Create from the current commit",
-                    },
-                    ...branches.map((b) => ({
-                        label: `$(git-branch) ${b}`,
-                        description: b === currentBranch ? "(current)" : "",
-                        detail: `Create from '${b}'`,
-                    })),
-                ];
-                const sourcePick = await vscode.window.showQuickPick(
-                    sourceItems,
-                    {
-                        placeHolder: "Create worktree from which branch?",
-                        title: "WorkTree Pilot: Source Branch",
-                    }
+                // Smart defaults
+                const config =
+                    vscode.workspace.getConfiguration("worktreePilot");
+                const baseBranch = config.get<string>(
+                    "defaultBaseBranch",
+                    "main"
                 );
-                if (!sourcePick) return;
-                const startPoint = sourcePick.label.includes("Current HEAD")
-                    ? undefined
-                    : sourcePick.label.replace(/^\$\(git-branch\)\s*/, "");
-
-                // 4. Select directory
-                const config = vscode.workspace.getConfiguration("worktreePilot");
                 const worktreeDir = config.get<string>(
                     "worktreeLocation",
                     ".claude/worktrees"
                 );
-                const defaultPath = computeWorktreePath(
-                    repoRoot,
-                    branchName,
-                    worktreeDir
-                );
-                const dirItems: vscode.QuickPickItem[] = [
-                    {
-                        label: "$(folder) Default location",
-                        detail: defaultPath,
-                    },
-                    {
-                        label: "$(folder-opened) Choose custom directory...",
-                        detail: "Browse for a different location",
-                    },
-                ];
-                const dirPick = await vscode.window.showQuickPick(dirItems, {
-                    placeHolder: "Where to create the worktree?",
-                    title: "WorkTree Pilot: Directory",
-                });
-                if (!dirPick) return;
 
-                let wtPath = defaultPath;
-                if (dirPick.label.includes("Choose custom")) {
-                    const folders = await vscode.window.showOpenDialog({
-                        canSelectFolders: true,
-                        canSelectFiles: false,
-                        canSelectMany: false,
-                        openLabel: "Select Worktree Directory",
-                    });
-                    if (!folders || folders.length === 0) return;
-                    wtPath = folders[0].fsPath;
-                }
-
-                // 5. Create with progress
+                // Create with progress
                 try {
                     const result = await vscode.window.withProgress(
                         {
@@ -284,13 +229,11 @@ export async function activate(
                             title: `Creating worktree '${branchName}'...`,
                             cancellable: false,
                         },
-                        async () =>
-                            createWorktree(repoRoot, branchName, {
-                                customPath:
-                                    wtPath !== defaultPath
-                                        ? wtPath
-                                        : undefined,
-                                startPoint,
+                        async () => {
+                            const pmSetting = config.get<string>("packageManager", "auto");
+                            const pm = pmSetting === "auto" ? undefined : pmSetting as import("./utils/package-manager").PackageManager;
+                            return createWorktree(repoRoot, branchName, {
+                                startPoint: baseBranch,
                                 worktreeDir,
                                 autoGitignore: config.get<boolean>(
                                     "autoGitignore",
@@ -300,29 +243,31 @@ export async function activate(
                                     "autoInstallDependencies",
                                     true
                                 ),
-                            })
+                                packageManager: pm,
+                            });
+                        }
                     );
 
                     refreshAll();
 
-                    // 6. Success with actions
+                    // Success with actions
                     const action =
                         await vscode.window.showInformationMessage(
                             `Worktree created: ${result.branch}`,
-                            "Open in New Window",
+                            "Launch Claude Code",
                             "Open Terminal",
-                            "Launch Claude"
+                            "Open in New Window"
                         );
 
-                    if (action === "Open in New Window") {
-                        await openInNewWindow(result.path);
-                    } else if (action === "Open Terminal") {
-                        openTerminal(`WT: ${result.branch}`, result.path);
-                    } else if (action === "Launch Claude") {
+                    if (action === "Launch Claude Code") {
                         await launchClaudeWithTracking(
                             result.branch,
                             result.path
                         );
+                    } else if (action === "Open Terminal") {
+                        openTerminal(`WT: ${result.branch}`, result.path);
+                    } else if (action === "Open in New Window") {
+                        await openInNewWindow(result.path);
                     }
                 } catch (err) {
                     logError("Failed to create worktree", err);
@@ -344,12 +289,12 @@ export async function activate(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "worktreePilot.deleteWorktree",
-            async (item?: WorktreeTreeItem) => {
+            async (item?: WorktreeItem) => {
                 if (!item?.worktree) return;
                 const wt = item.worktree;
 
                 if (wt.isMain) {
-                    void vscode.window.showWarningMessage(
+                    void showAutoWarning(
                         "Cannot delete the main worktree."
                     );
                     return;
@@ -372,41 +317,50 @@ export async function activate(
                     }
                 }
 
-                // Warn about uncommitted changes
-                if (
-                    wt.statusSummary !== "clean" &&
-                    wt.statusSummary !== "missing"
-                ) {
-                    const confirm = await vscode.window.showWarningMessage(
-                        `Worktree '${wt.branch}' has uncommitted changes. Delete anyway?`,
-                        { modal: true },
-                        "Force Delete"
-                    );
-                    if (confirm !== "Force Delete") return;
-
-                    await removeWorktree(repoRoot, wt.path, {
-                        deleteBranch: true,
-                        force: true,
-                    });
-                } else {
-                    const deleteBranch =
-                        await vscode.window.showWarningMessage(
-                            `Delete worktree '${wt.branch}'?`,
+                try {
+                    // Warn about uncommitted changes
+                    if (
+                        wt.statusSummary !== "clean" &&
+                        wt.statusSummary !== "missing"
+                    ) {
+                        const confirm = await vscode.window.showWarningMessage(
+                            `Worktree '${wt.branch}' has uncommitted changes. Delete anyway?`,
                             { modal: true },
-                            "Delete",
-                            "Delete + Branch"
+                            "Force Delete"
                         );
-                    if (!deleteBranch) return;
+                        if (confirm !== "Force Delete") return;
 
-                    await removeWorktree(repoRoot, wt.path, {
-                        deleteBranch: deleteBranch === "Delete + Branch",
-                    });
+                        await removeWorktree(repoRoot, wt.path, {
+                            deleteBranch: true,
+                            force: true,
+                            protectedBranches: getProtectedBranches(),
+                        });
+                    } else {
+                        const deleteBranch =
+                            await vscode.window.showWarningMessage(
+                                `Delete worktree '${wt.branch}'?`,
+                                { modal: true },
+                                "Delete",
+                                "Delete + Branch"
+                            );
+                        if (!deleteBranch) return;
+
+                        await removeWorktree(repoRoot, wt.path, {
+                            deleteBranch: deleteBranch === "Delete + Branch",
+                            protectedBranches: getProtectedBranches(),
+                        });
+                    }
+
+                    refreshAll();
+                    void showAutoInfo(
+                        `Deleted worktree: ${wt.branch}`
+                    );
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    void vscode.window.showErrorMessage(
+                        `Failed to delete worktree '${wt.branch}': ${msg}`
+                    );
                 }
-
-                refreshAll();
-                void vscode.window.showInformationMessage(
-                    `Deleted worktree: ${wt.branch}`
-                );
             }
         )
     );
@@ -416,11 +370,18 @@ export async function activate(
         vscode.commands.registerCommand(
             "worktreePilot.cleanupWorktrees",
             async () => {
-                const worktrees = await listAllWorktrees(repoRoot);
+                let worktrees;
+                try {
+                    worktrees = await listAllWorktrees(repoRoot);
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    void vscode.window.showErrorMessage(`Failed to list worktrees: ${msg}`);
+                    return;
+                }
                 const removable = worktrees.filter((wt) => !wt.isMain);
 
                 if (removable.length === 0) {
-                    void vscode.window.showInformationMessage(
+                    void showAutoInfo(
                         "No worktrees to clean up."
                     );
                     return;
@@ -471,7 +432,7 @@ export async function activate(
                                 wt.statusSummary === "missing"
                         );
                         if (toRemove.length === 0) {
-                            void vscode.window.showInformationMessage(
+                            void showAutoInfo(
                                 "No clean worktrees left to remove."
                             );
                             return;
@@ -505,6 +466,7 @@ export async function activate(
                                 await removeWorktree(repoRoot, wt.path, {
                                     deleteBranch: deleteBranches,
                                     force,
+                                    protectedBranches: getProtectedBranches(),
                                 });
                                 removed++;
                             } catch (err) {
@@ -514,7 +476,7 @@ export async function activate(
                                 );
                             }
                         }
-                        void vscode.window.showInformationMessage(
+                        void showAutoInfo(
                             `Cleaned up ${removed} worktree(s).`
                         );
                     }
@@ -536,7 +498,7 @@ export async function activate(
         const config = vscode.workspace.getConfiguration("worktreePilot");
         const maxSessions = config.get<number>("maxConcurrentSessions", 5);
         if (sessionTracker.activeCount >= maxSessions) {
-            void vscode.window.showWarningMessage(
+            void showAutoWarning(
                 `Maximum concurrent sessions (${maxSessions}) reached. Stop a session first.`
             );
             return;
@@ -569,40 +531,47 @@ export async function activate(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "worktreePilot.launchSession",
-            async (item?: WorktreeTreeItem) => {
+            async (item?: WorktreeItem) => {
                 if (!item?.worktree) return;
 
-                // Warn if session already running for this worktree
-                if (sessionTracker.hasActiveSession(item.worktree.path)) {
-                    const action = await vscode.window.showWarningMessage(
-                        `A Claude session is already running in '${item.worktree.branch}'.`,
-                        "Open Terminal",
-                        "Launch Another",
-                        "Cancel"
-                    );
-                    if (action === "Open Terminal") {
-                        const session = sessionTracker.getSessionForWorktree(
-                            item.worktree.path
+                try {
+                    // Warn if session already running for this worktree
+                    if (sessionTracker.hasActiveSession(item.worktree.path)) {
+                        const action = await vscode.window.showWarningMessage(
+                            `A Claude session is already running in '${item.worktree.branch}'.`,
+                            "Open Terminal",
+                            "Launch Another",
+                            "Cancel"
                         );
-                        if (session) {
-                            const terminal =
-                                sessionTracker.getTerminalForSession(
-                                    session.id
-                                );
-                            if (terminal) {
-                                terminal.show();
-                                return;
+                        if (action === "Open Terminal") {
+                            const session = sessionTracker.getSessionForWorktree(
+                                item.worktree.path
+                            );
+                            if (session) {
+                                const terminal =
+                                    sessionTracker.getTerminalForSession(
+                                        session.id
+                                    );
+                                if (terminal) {
+                                    terminal.show();
+                                    return;
+                                }
                             }
+                        } else if (action !== "Launch Another") {
+                            return;
                         }
-                    } else if (action !== "Launch Another") {
-                        return;
                     }
-                }
 
-                await launchClaudeWithTracking(
-                    item.worktree.branch,
-                    item.worktree.path
-                );
+                    await launchClaudeWithTracking(
+                        item.worktree.branch,
+                        item.worktree.path
+                    );
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    void vscode.window.showErrorMessage(
+                        `Failed to launch session: ${msg}`
+                    );
+                }
             }
         )
     );
@@ -611,7 +580,7 @@ export async function activate(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "worktreePilot.stopSession",
-            async (item?: SessionTreeItem) => {
+            async (item?: SessionItem) => {
                 if (!item?.session) return;
 
                 if (
@@ -628,7 +597,14 @@ export async function activate(
                 );
                 if (confirm !== "Stop") return;
 
-                sessionTracker.stopSession(item.session.id);
+                try {
+                    sessionTracker.stopSession(item.session.id);
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    void vscode.window.showErrorMessage(
+                        `Failed to stop session: ${msg}`
+                    );
+                }
             }
         )
     );
@@ -640,7 +616,7 @@ export async function activate(
             async () => {
                 const count = sessionTracker.activeCount;
                 if (count === 0) {
-                    void vscode.window.showInformationMessage(
+                    void showAutoInfo(
                         "No active sessions."
                     );
                     return;
@@ -653,10 +629,17 @@ export async function activate(
                 );
                 if (confirm !== "Stop All") return;
 
-                sessionTracker.stopAllSessions();
-                void vscode.window.showInformationMessage(
-                    `Stopped ${count} session(s).`
-                );
+                try {
+                    sessionTracker.stopAllSessions();
+                    void showAutoInfo(
+                        `Stopped ${count} session(s).`
+                    );
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    void vscode.window.showErrorMessage(
+                        `Failed to stop sessions: ${msg}`
+                    );
+                }
             }
         )
     );
@@ -665,7 +648,7 @@ export async function activate(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "worktreePilot.focusSession",
-            (item?: SessionTreeItem) => {
+            (item?: SessionItem) => {
                 if (!item?.session) return;
                 const terminal = sessionTracker.getTerminalForSession(
                     item.session.id
@@ -673,7 +656,7 @@ export async function activate(
                 if (terminal) {
                     terminal.show();
                 } else {
-                    void vscode.window.showWarningMessage(
+                    void showAutoWarning(
                         "Terminal no longer available."
                     );
                 }
@@ -685,7 +668,7 @@ export async function activate(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "worktreePilot.setTaskDescription",
-            async (item?: SessionTreeItem) => {
+            async (item?: SessionItem) => {
                 if (!item?.session) return;
 
                 const desc = await vscode.window.showInputBox({
@@ -695,7 +678,14 @@ export async function activate(
                 });
                 if (desc === undefined) return;
 
-                sessionTracker.setTaskDescription(item.session.id, desc);
+                try {
+                    sessionTracker.setTaskDescription(item.session.id, desc);
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    void vscode.window.showErrorMessage(
+                        `Failed to update task description: ${msg}`
+                    );
+                }
             }
         )
     );
@@ -714,12 +704,19 @@ export async function activate(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "worktreePilot.openInTerminal",
-            async (item?: WorktreeTreeItem) => {
+            async (item?: WorktreeItem) => {
                 if (!item?.worktree) return;
-                openTerminal(
-                    `WT: ${item.worktree.branch}`,
-                    item.worktree.path
-                );
+                try {
+                    openTerminal(
+                        `WT: ${item.worktree.branch}`,
+                        item.worktree.path
+                    );
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    void vscode.window.showErrorMessage(
+                        `Failed to open terminal: ${msg}`
+                    );
+                }
             }
         )
     );
@@ -728,9 +725,16 @@ export async function activate(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "worktreePilot.openInNewWindow",
-            async (item?: WorktreeTreeItem) => {
+            async (item?: WorktreeItem) => {
                 if (!item?.worktree) return;
-                await openInNewWindow(item.worktree.path);
+                try {
+                    await openInNewWindow(item.worktree.path);
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    void vscode.window.showErrorMessage(
+                        `Failed to open new window: ${msg}`
+                    );
+                }
             }
         )
     );
@@ -739,20 +743,27 @@ export async function activate(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "worktreePilot.viewDiff",
-            async (item?: WorktreeTreeItem) => {
+            async (item?: WorktreeItem) => {
                 if (!item?.worktree) return;
-                const terminal = openTerminal(
-                    `Diff: ${item.worktree.branch}`,
-                    item.worktree.path
-                );
-                const config = vscode.workspace.getConfiguration(
-                    "worktreePilot"
-                );
-                const baseBranch = config.get<string>(
-                    "defaultBaseBranch",
-                    "main"
-                );
-                terminal.sendText(`git diff ${baseBranch}...HEAD --stat`);
+                try {
+                    const terminal = openTerminal(
+                        `Diff: ${item.worktree.branch}`,
+                        item.worktree.path
+                    );
+                    const config = vscode.workspace.getConfiguration(
+                        "worktreePilot"
+                    );
+                    const baseBranch = config.get<string>(
+                        "defaultBaseBranch",
+                        "main"
+                    );
+                    terminal.sendText(`git diff ${sanitizeRefName(baseBranch)}...HEAD --stat`);
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    void vscode.window.showErrorMessage(
+                        `Failed to view diff: ${msg}`
+                    );
+                }
             }
         )
     );
@@ -782,6 +793,43 @@ export async function activate(
         )
     );
 
+    // Quick Menu (status bar click)
+    context.subscriptions.push(
+        vscode.commands.registerCommand("worktreePilot.quickMenu", async () => {
+            try {
+                const items: Array<vscode.QuickPickItem & { commandId: string }> = [
+                    { label: "$(add) Create Worktree", commandId: "worktreePilot.createWorktree" },
+                    { label: "$(organization) Launch Agent Team", commandId: "worktreePilot.launchTeam" },
+                    { label: "$(dashboard) Open Dashboard", commandId: "worktreePilot.openDashboard" },
+                ];
+
+                if (sessionTracker.activeCount > 0) {
+                    items.push(
+                        { label: "$(debug-stop) Stop All Sessions", commandId: "worktreePilot.stopAllSessions" },
+                    );
+                }
+
+                items.push(
+                    { label: "$(shield) Check File Overlaps", commandId: "worktreePilot.runOverlapCheck" },
+                    { label: "$(checklist) Generate Merge Report", commandId: "worktreePilot.generateMergeReport" },
+                    { label: "$(merge) Execute Merge Sequence", commandId: "worktreePilot.executeMergeSequence" },
+                );
+
+                const picked = await vscode.window.showQuickPick(items, {
+                    placeHolder: `WorkTree Pilot (${sessionTracker.activeCount} active sessions)`,
+                });
+                if (picked) {
+                    await vscode.commands.executeCommand(picked.commandId);
+                }
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                void vscode.window.showErrorMessage(
+                    `Quick menu error: ${msg}`
+                );
+            }
+        })
+    );
+
     // ── Team Commands ─────────────────────────────────────────
 
     // Launch Agent Team
@@ -789,6 +837,7 @@ export async function activate(
         vscode.commands.registerCommand(
             "worktreePilot.launchTeam",
             async () => {
+                try {
                 const config = vscode.workspace.getConfiguration("worktreePilot");
                 const templateDir = config.get<string>(
                     "templateDirectory",
@@ -798,7 +847,7 @@ export async function activate(
                 // 1. Pick a template
                 const templateList = listTemplateNames(repoRoot, templateDir);
                 if (templateList.length === 0) {
-                    void vscode.window.showWarningMessage(
+                    void showAutoWarning(
                         "No team templates found. Create one with " +
                         "'WorkTree Pilot: Create Team Template'."
                     );
@@ -864,19 +913,20 @@ export async function activate(
                     const proceed = await vscode.window.showWarningMessage(
                         `Ownership overlaps detected:\n${overlapMsg}`,
                         { modal: true },
-                        "Continue Anyway",
-                        "Cancel"
+                        "Continue Anyway"
                     );
                     if (proceed !== "Continue Anyway") return;
                 }
 
-                // Show warnings
-                if (preflight.warnings.length > 0 && preflight.overlaps.length === 0) {
+                // Show non-overlap warnings (always, even if overlaps were shown)
+                const nonOverlapWarnings = preflight.warnings.filter(
+                    (w) => !w.toLowerCase().includes("overlap")
+                );
+                if (nonOverlapWarnings.length > 0) {
                     const proceed = await vscode.window.showWarningMessage(
-                        preflight.warnings.join("\n"),
+                        nonOverlapWarnings.join("\n"),
                         { modal: true },
-                        "Continue",
-                        "Cancel"
+                        "Continue"
                     );
                     if (proceed !== "Continue") return;
                 }
@@ -921,22 +971,26 @@ export async function activate(
                             const running = team.agents.filter(
                                 (a) => a.status === "running"
                             ).length;
-                            void vscode.window.showInformationMessage(
-                                `Team "${teamName}" launched: ${running}/${template.agents.length} agents running.`,
-                                "Open Dashboard"
-                            ).then((action) => {
-                                if (action === "Open Dashboard") {
-                                    DashboardPanel.createOrShow(
-                                        context.extensionUri,
-                                        repoRoot,
-                                        sessionTracker,
-                                        overlapDetector
-                                    );
-                                }
-                            });
+                            void showAutoInfo(
+                                `Team "${teamName}" launched: ${running}/${template.agents.length} agents running.`
+                            );
+
+                            // Auto-open dashboard after team launch
+                            DashboardPanel.createOrShow(
+                                context.extensionUri,
+                                repoRoot,
+                                sessionTracker,
+                                overlapDetector
+                            );
                         }
                     }
                 );
+                } catch (err) {
+                    logError("Team launch failed", err);
+                    void vscode.window.showErrorMessage(
+                        `Team launch failed: ${err instanceof Error ? err.message : String(err)}`
+                    );
+                }
             }
         )
     );
@@ -956,8 +1010,15 @@ export async function activate(
                 );
                 if (confirm !== "Stop Team") return;
 
-                orchestrator.stopTeam(teamId);
-                refreshAll();
+                try {
+                    orchestrator.stopTeam(teamId);
+                    refreshAll();
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    void vscode.window.showErrorMessage(
+                        `Failed to stop team: ${msg}`
+                    );
+                }
             }
         )
     );
@@ -966,11 +1027,18 @@ export async function activate(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "worktreePilot.stopAgent",
-            async (item?: AgentTreeItem) => {
-                if (!item?.agent || !item.teamId) return;
+            async (item?: AgentItem) => {
+                if (!item?.agentState || !item.teamId) return;
 
-                orchestrator.stopAgent(item.teamId, item.agent.role);
-                refreshAll();
+                try {
+                    orchestrator.stopAgent(item.teamId, item.agentState.role);
+                    refreshAll();
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    void vscode.window.showErrorMessage(
+                        `Failed to stop agent: ${msg}`
+                    );
+                }
             }
         )
     );
@@ -979,16 +1047,16 @@ export async function activate(
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "worktreePilot.focusAgent",
-            (item?: AgentTreeItem) => {
-                if (!item?.agent?.sessionId) return;
+            (item?: AgentItem) => {
+                if (!item?.agentState?.sessionId) return;
 
                 const terminal = sessionTracker.getTerminalForSession(
-                    item.agent.sessionId
+                    item.agentState.sessionId
                 );
                 if (terminal) {
                     terminal.show();
                 } else {
-                    void vscode.window.showWarningMessage(
+                    void showAutoWarning(
                         "Terminal no longer available."
                     );
                 }
@@ -1018,7 +1086,14 @@ export async function activate(
                         cancellable: false,
                     },
                     async () => {
-                        await orchestrator.cleanupTeam(teamId);
+                        try {
+                            await orchestrator.cleanupTeam(teamId);
+                        } catch (err) {
+                            logError("Team cleanup failed", err);
+                            void vscode.window.showErrorMessage(
+                                `Cleanup failed: ${err instanceof Error ? err.message : String(err)}`
+                            );
+                        }
                         refreshAll();
                     }
                 );
@@ -1031,9 +1106,10 @@ export async function activate(
         vscode.commands.registerCommand(
             "worktreePilot.runOverlapCheck",
             async () => {
+                try {
                 const activeSessions = sessionTracker.getActiveSessions();
                 if (activeSessions.length < 2) {
-                    void vscode.window.showInformationMessage(
+                    void showAutoInfo(
                         "Need at least 2 active sessions to check for overlaps."
                     );
                     return;
@@ -1072,12 +1148,18 @@ export async function activate(
                                 );
                             }
                         } else {
-                            void vscode.window.showInformationMessage(
+                            void showAutoInfo(
                                 "No file overlaps detected."
                             );
                         }
                     }
                 );
+                } catch (err) {
+                    logError("Overlap check failed", err);
+                    void vscode.window.showErrorMessage(
+                        `Overlap check failed: ${err instanceof Error ? err.message : String(err)}`
+                    );
+                }
             }
         )
     );
@@ -1089,11 +1171,12 @@ export async function activate(
         vscode.commands.registerCommand(
             "worktreePilot.generateMergeReport",
             async () => {
+                try {
                 const worktrees = await listAllWorktrees(repoRoot);
                 const nonMain = worktrees.filter((wt) => !wt.isMain);
 
                 if (nonMain.length === 0) {
-                    void vscode.window.showInformationMessage(
+                    void showAutoInfo(
                         "No worktrees to generate a merge report for."
                     );
                     return;
@@ -1149,7 +1232,13 @@ export async function activate(
                 const msg = overlapCount > 0
                     ? `Merge report ready. ${overlapCount} file overlap(s) detected.`
                     : "Merge report ready. No file overlaps detected.";
-                void vscode.window.showInformationMessage(msg);
+                void showAutoInfo(msg);
+                } catch (err) {
+                    logError("Merge report generation failed", err);
+                    void vscode.window.showErrorMessage(
+                        `Merge report failed: ${err instanceof Error ? err.message : String(err)}`
+                    );
+                }
             }
         )
     );
@@ -1159,11 +1248,12 @@ export async function activate(
         vscode.commands.registerCommand(
             "worktreePilot.executeMergeSequence",
             async () => {
+                try {
                 const worktrees = await listAllWorktrees(repoRoot);
                 const nonMain = worktrees.filter((wt) => !wt.isMain);
 
                 if (nonMain.length === 0) {
-                    void vscode.window.showInformationMessage(
+                    void showAutoInfo(
                         "No worktrees to merge."
                     );
                     return;
@@ -1216,6 +1306,39 @@ export async function activate(
                 );
                 if (confirm !== "Start Merge") return;
 
+                // Pre-flight: ensure repo is in a clean state
+                const repoState = await checkRepoState(repoRoot);
+                if (!repoState.clean) {
+                    void vscode.window.showErrorMessage(
+                        `Cannot start merge: ${repoState.reason}`
+                    );
+                    return;
+                }
+
+                // Auto-commit uncommitted changes in each worktree before merging.
+                // Only stage tracked files (git add -u) to avoid committing
+                // generated CLAUDE.md, .env files, or other untracked artifacts.
+                for (const pick of picks) {
+                    const wtPath = pick.worktree.path;
+                    try {
+                        const status = await git(["status", "--porcelain"], wtPath);
+                        if (status.trim().length > 0) {
+                            await gitWrite(["add", "-u"], wtPath);
+                            // Check if there's actually anything staged after -u
+                            const staged = await git(["diff", "--cached", "--name-only"], wtPath);
+                            if (staged.trim().length > 0) {
+                                await gitWrite(
+                                    ["commit", "-m", "WorkTree Pilot: auto-commit agent changes"],
+                                    wtPath
+                                );
+                                log(`Auto-committed changes in ${pick.worktree.branch}`);
+                            }
+                        }
+                    } catch (err) {
+                        logError(`Failed to auto-commit in ${pick.worktree.branch}`, err);
+                    }
+                }
+
                 // Execute merges sequentially
                 const results: Array<{ branch: string; status: string; message: string }> = [];
 
@@ -1253,6 +1376,26 @@ export async function activate(
                                 "Continue"
                             );
 
+                            // Verify conflicts are actually resolved
+                            const postResolveState = await checkRepoState(repoRoot);
+                            if (!postResolveState.clean) {
+                                const forceAction = await vscode.window.showWarningMessage(
+                                    `Conflicts may not be fully resolved: ${postResolveState.reason}`,
+                                    { modal: true },
+                                    "Continue Anyway",
+                                    "Abort Merge"
+                                );
+                                if (forceAction === "Abort Merge") {
+                                    await abortMerge(repoRoot);
+                                    results.push({
+                                        branch,
+                                        status: "aborted",
+                                        message: "Merge aborted — conflicts unresolved",
+                                    });
+                                    break;
+                                }
+                            }
+
                             results.push({
                                 branch,
                                 status: "resolved",
@@ -1267,7 +1410,11 @@ export async function activate(
                             });
                             break;
                         } else {
-                            await abortMerge(repoRoot);
+                            try {
+                                await abortMerge(repoRoot);
+                            } catch {
+                                // merge --abort may fail if no merge is in progress
+                            }
                             results.push({
                                 branch,
                                 status: "skipped",
@@ -1276,6 +1423,13 @@ export async function activate(
                             continue;
                         }
                     } else if (step.status === "error") {
+                        // Clean up any partial merge state before continuing
+                        try {
+                            await abortMerge(repoRoot);
+                        } catch {
+                            // No merge in progress to abort — that's fine
+                        }
+
                         results.push({
                             branch,
                             status: "error",
@@ -1360,15 +1514,22 @@ export async function activate(
                             mergedPicks.map((p) => ({
                                 path: p.worktree.path,
                                 branch: p.worktree.branch,
-                            }))
+                            })),
+                            { protectedBranches: getProtectedBranches() }
                         );
                         refreshAll();
                     }
                 } else {
-                    void vscode.window.showInformationMessage(summary);
+                    void showAutoInfo(summary);
                 }
 
                 refreshAll();
+                } catch (err) {
+                    logError("Merge sequence failed", err);
+                    void vscode.window.showErrorMessage(
+                        `Merge sequence failed: ${err instanceof Error ? err.message : String(err)}`
+                    );
+                }
             }
         )
     );
@@ -1377,14 +1538,14 @@ export async function activate(
 
     const gitWorktreesPattern = new vscode.RelativePattern(
         repoRoot,
-        ".git/worktrees/**"
+        ".git/worktrees/*/HEAD"
     );
     const watcher =
         vscode.workspace.createFileSystemWatcher(gitWorktreesPattern);
     let refreshTimeout: NodeJS.Timeout | undefined;
     const debouncedRefresh = (): void => {
         if (refreshTimeout) clearTimeout(refreshTimeout);
-        refreshTimeout = setTimeout(refreshAll, 300);
+        refreshTimeout = setTimeout(refreshAll, 2000);
     };
     watcher.onDidCreate(debouncedRefresh);
     watcher.onDidDelete(debouncedRefresh);
@@ -1393,17 +1554,14 @@ export async function activate(
     // ── Register disposables ────────────────────────────────
 
     context.subscriptions.push(
-        worktreeView,
-        sessionView,
-        teamView,
-        worktreeTreeProvider,
-        sessionTreeProvider,
-        teamTreeProvider,
+        unifiedProvider,
+        completedProvider,
         sessionTracker,
         orchestrator,
         overlapDetector,
         statusBarItem,
-        watcher
+        watcher,
+        { dispose: () => { if (refreshTimeout) clearTimeout(refreshTimeout); } }
     );
 
     // Initial status bar update

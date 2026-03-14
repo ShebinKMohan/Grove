@@ -13,21 +13,30 @@ import { log, logError } from "./logger";
 
 const execFileAsync = promisify(execFile);
 
-export type PackageManager = "npm" | "yarn" | "pnpm" | "pip" | "poetry" | "none";
+export type PackageManager = "npm" | "yarn" | "pnpm" | "pip" | "pipenv" | "poetry" | "none";
 
 /**
  * Detect the package manager used in a directory.
  * Checks lock files and config files in priority order.
  */
-export function detectPackageManager(dir: string): PackageManager {
+function detectPackageManager(dir: string): PackageManager {
     if (fs.existsSync(path.join(dir, "pnpm-lock.yaml"))) return "pnpm";
     if (fs.existsSync(path.join(dir, "yarn.lock"))) return "yarn";
     if (fs.existsSync(path.join(dir, "package-lock.json"))) return "npm";
     if (fs.existsSync(path.join(dir, "package.json"))) return "npm";
     if (fs.existsSync(path.join(dir, "poetry.lock"))) return "poetry";
-    if (fs.existsSync(path.join(dir, "Pipfile.lock"))) return "pip";
+    if (fs.existsSync(path.join(dir, "Pipfile.lock")) || fs.existsSync(path.join(dir, "Pipfile"))) return "pipenv";
     if (fs.existsSync(path.join(dir, "requirements.txt"))) return "pip";
-    if (fs.existsSync(path.join(dir, "pyproject.toml"))) return "poetry";
+    // Only assume Poetry if pyproject.toml has [tool.poetry]; otherwise use pip
+    if (fs.existsSync(path.join(dir, "pyproject.toml"))) {
+        try {
+            const content = fs.readFileSync(path.join(dir, "pyproject.toml"), "utf-8");
+            if (content.includes("[tool.poetry")) return "poetry";
+        } catch {
+            // fall through
+        }
+        return "pip";
+    }
 
     return "none";
 }
@@ -45,6 +54,8 @@ function getInstallCommand(pm: PackageManager): [string, string[]] {
             return ["pnpm", ["install"]];
         case "pip":
             return ["pip", ["install", "-r", "requirements.txt"]];
+        case "pipenv":
+            return ["pipenv", ["install"]];
         case "poetry":
             return ["poetry", ["install"]];
         case "none":
@@ -56,8 +67,11 @@ function getInstallCommand(pm: PackageManager): [string, string[]] {
  * Install dependencies in a directory using the detected package manager.
  * Returns true if installation succeeded or was skipped (no package manager).
  */
-export async function installDependencies(dir: string): Promise<boolean> {
-    const pm = detectPackageManager(dir);
+export async function installDependencies(
+    dir: string,
+    override?: PackageManager
+): Promise<boolean> {
+    const pm = override && override !== "none" ? override : detectPackageManager(dir);
     if (pm === "none") {
         log(`No package manager detected in ${dir}`);
         return true;

@@ -81,15 +81,15 @@ export async function gitWrite(args: string[], cwd: string): Promise<string> {
 }
 
 /**
- * Check if a directory is inside a git repository.
+ * Sanitize a git ref name for safe interpolation into shell commands.
+ * Rejects anything that isn't a plausible branch/tag name.
  */
-export async function isGitRepo(cwd: string): Promise<boolean> {
-    try {
-        await git(["rev-parse", "--git-dir"], cwd);
-        return true;
-    } catch {
-        return false;
+export function sanitizeRefName(name: string): string {
+    // Allow only characters valid in git ref names
+    if (!/^[a-zA-Z0-9_./-]+$/.test(name)) {
+        return "HEAD";
     }
+    return name;
 }
 
 /**
@@ -142,18 +142,6 @@ export async function branchExistsOnRemote(
     } catch {
         return false;
     }
-}
-
-/**
- * List local branch names.
- */
-export async function listLocalBranches(cwd: string): Promise<string[]> {
-    const output = await git(
-        ["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
-        cwd
-    );
-    if (!output) return [];
-    return output.split("\n").filter(Boolean);
 }
 
 /**
