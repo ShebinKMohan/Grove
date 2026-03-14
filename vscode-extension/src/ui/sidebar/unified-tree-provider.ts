@@ -193,6 +193,11 @@ export class TeamItem extends vscode.TreeItem {
                     "debug-stop",
                     new vscode.ThemeColor("disabledForeground")
                 );
+            case "cancelled":
+                return new vscode.ThemeIcon(
+                    "circle-slash",
+                    new vscode.ThemeColor("disabledForeground")
+                );
         }
     }
 
@@ -909,7 +914,8 @@ export class CompletedTreeProvider
                     (t) =>
                         t.status === "completed" ||
                         t.status === "error" ||
-                        t.status === "stopped"
+                        t.status === "stopped" ||
+                        t.status === "cancelled"
                 );
             for (const team of completedTeams) {
                 const item = new TeamItem(team);

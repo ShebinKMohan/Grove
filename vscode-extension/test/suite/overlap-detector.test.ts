@@ -17,6 +17,7 @@ import { detectOwnershipOverlaps } from "../../src/core/template-manager";
 import type { TeamTemplate } from "../../src/core/template-manager";
 
 describe("overlap-detector data model", () => {
+    // TODO(v0.2.1): This test reimplements logic locally instead of importing from source. Fix to test actual module.
     describe("severity classification", () => {
         // These test the conceptual rules used by overlap-detector.ts:
         // - shared config files (package.json, tsconfig.json, etc.) → "info"
@@ -134,6 +135,7 @@ describe("overlap-detector data model", () => {
         });
     });
 
+    // TODO(v0.2.1): This test reimplements logic locally instead of importing from source. Fix to test actual module.
     describe("overlap alert data model", () => {
         interface OverlapAlert {
             filePath: string;

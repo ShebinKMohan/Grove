@@ -95,6 +95,7 @@ describe("session-tracker data model", () => {
         });
     });
 
+    // TODO(v0.2.1): This test reimplements logic locally instead of importing from source. Fix to test actual module.
     describe("elapsed time calculation", () => {
         it("formats seconds correctly", () => {
             const elapsed = formatElapsed(30_000); // 30 seconds
@@ -112,6 +113,7 @@ describe("session-tracker data model", () => {
         });
     });
 
+    // TODO(v0.2.1): This test reimplements logic locally instead of importing from source. Fix to test actual module.
     describe("session ID generation", () => {
         it("generates unique IDs", () => {
             const ids = new Set<string>();

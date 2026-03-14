@@ -951,40 +951,33 @@ export async function activate(
                 );
                 if (confirm !== "Launch Team") return;
 
-                // 6. Launch with progress
-                await vscode.window.withProgress(
-                    {
-                        location: vscode.ProgressLocation.Notification,
-                        title: `Launching team "${teamName}"...`,
-                        cancellable: false,
-                    },
-                    async () => {
-                        const team = await orchestrator.launchTeam(
-                            template,
-                            taskDescription || "",
-                            teamName
-                        );
-
-                        if (team) {
-                            refreshAll();
-
-                            const running = team.agents.filter(
-                                (a) => a.status === "running"
-                            ).length;
-                            void showAutoInfo(
-                                `Team "${teamName}" launched: ${running}/${template.agents.length} agents running.`
-                            );
-
-                            // Auto-open dashboard after team launch
-                            DashboardPanel.createOrShow(
-                                context.extensionUri,
-                                repoRoot,
-                                sessionTracker,
-                                overlapDetector
-                            );
-                        }
-                    }
+                // 6. Launch (orchestrator manages its own progress + cancellation)
+                const team = await orchestrator.launchTeam(
+                    template,
+                    taskDescription || "",
+                    teamName
                 );
+
+                if (team && team.status !== "cancelled") {
+                    refreshAll();
+
+                    const running = team.agents.filter(
+                        (a) => a.status === "running"
+                    ).length;
+                    void showAutoInfo(
+                        `Team "${teamName}" launched: ${running}/${template.agents.length} agents running.`
+                    );
+
+                    // Auto-open dashboard after team launch
+                    DashboardPanel.createOrShow(
+                        context.extensionUri,
+                        repoRoot,
+                        sessionTracker,
+                        overlapDetector
+                    );
+                } else if (team) {
+                    refreshAll();
+                }
                 } catch (err) {
                     logError("Team launch failed", err);
                     void vscode.window.showErrorMessage(
@@ -1306,6 +1299,30 @@ export async function activate(
                 );
                 if (confirm !== "Start Merge") return;
 
+                // ── Pre-Merge Safety: save open files ────────────
+                await vscode.workspace.saveAll(false);
+
+                // ── Pre-Merge Safety: check for active sessions ──
+                const worktreePathsToMerge = picks.map((p) => p.worktree.path);
+                const activeSessionsInMerge = sessionTracker
+                    .getActiveSessions()
+                    .filter((s) => worktreePathsToMerge.includes(s.worktreePath));
+
+                if (activeSessionsInMerge.length > 0) {
+                    const sessionAction = await vscode.window.showWarningMessage(
+                        `${activeSessionsInMerge.length} agent session(s) are still running in worktrees being merged. Stop them before merging.`,
+                        "Stop All & Continue",
+                        "Cancel"
+                    );
+                    if (sessionAction === "Stop All & Continue") {
+                        for (const session of activeSessionsInMerge) {
+                            sessionTracker.stopSession(session.id);
+                        }
+                    } else {
+                        return;
+                    }
+                }
+
                 // Pre-flight: ensure repo is in a clean state
                 const repoState = await checkRepoState(repoRoot);
                 if (!repoState.clean) {
@@ -1338,6 +1355,10 @@ export async function activate(
                         logError(`Failed to auto-commit in ${pick.worktree.branch}`, err);
                     }
                 }
+
+                // ── Capture pre-merge state for abort recovery ───
+                const preMergeHash = (await git(["rev-parse", "HEAD"], repoRoot)).trim();
+                const mergedBranches: string[] = [];
 
                 // Execute merges sequentially
                 const results: Array<{ branch: string; status: string; message: string }> = [];
@@ -1386,28 +1407,49 @@ export async function activate(
                                     "Abort Merge"
                                 );
                                 if (forceAction === "Abort Merge") {
-                                    await abortMerge(repoRoot);
+                                    try {
+                                        await abortMerge(repoRoot);
+                                    } catch {
+                                        // merge --abort may fail if already resolved
+                                    }
                                     results.push({
                                         branch,
                                         status: "aborted",
                                         message: "Merge aborted — conflicts unresolved",
                                     });
+                                    const previouslyMerged = mergedBranches.length > 0
+                                        ? ` Previously merged: ${mergedBranches.join(", ")}.`
+                                        : "";
+                                    void vscode.window.showInformationMessage(
+                                        `Merge aborted for '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`
+                                    );
                                     break;
                                 }
                             }
 
+                            mergedBranches.push(branch);
                             results.push({
                                 branch,
                                 status: "resolved",
                                 message: "Conflicts resolved manually",
                             });
                         } else if (action === "Abort Merge") {
-                            await abortMerge(repoRoot);
+                            try {
+                                await abortMerge(repoRoot);
+                            } catch {
+                                // merge --abort may fail if no merge is in progress
+                            }
                             results.push({
                                 branch,
                                 status: "aborted",
                                 message: "Merge aborted",
                             });
+                            const previouslyMerged = mergedBranches.length > 0
+                                ? ` Previously merged: ${mergedBranches.join(", ")}.`
+                                : "";
+                            void vscode.window.showInformationMessage(
+                                `Merge aborted for '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`
+                            );
                             break;
                         } else {
                             try {
@@ -1441,9 +1483,19 @@ export async function activate(
                             "Continue",
                             "Abort"
                         );
+                        if (action === "Abort") {
+                            const previouslyMerged = mergedBranches.length > 0
+                                ? ` Previously merged: ${mergedBranches.join(", ")}.`
+                                : "";
+                            void vscode.window.showInformationMessage(
+                                `Merge aborted for '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`
+                            );
+                            break;
+                        }
                         if (action !== "Continue") break;
                         continue;
                     } else {
+                        mergedBranches.push(branch);
                         results.push({
                             branch,
                             status: "merged",
@@ -1476,6 +1528,12 @@ export async function activate(
                             }
                             if (action === "Abort") {
                                 results[results.length - 1].status = "test-failed";
+                                const previouslyMerged = mergedBranches.length > 0
+                                    ? ` Previously merged: ${mergedBranches.join(", ")}.`
+                                    : "";
+                                void vscode.window.showInformationMessage(
+                                    `Merge sequence stopped after test failure on '${branch}'.${previouslyMerged} To undo all merges: git reset --hard ${preMergeHash}`
+                                );
                                 break;
                             }
                         }
