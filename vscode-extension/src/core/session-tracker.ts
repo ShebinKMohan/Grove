@@ -424,18 +424,18 @@ export class SessionTracker implements vscode.Disposable {
                     ? "completed"
                     : persisted.status;
 
+                // Drop interrupted sessions that had no meaningful duration
+                // (e.g., window reloaded right after launch). They just clutter the UI.
+                if (wasRunning && !persisted.endedAt) {
+                    log(`Dropping interrupted 0-duration session: ${persisted.branch}`);
+                    continue;
+                }
+
                 this.sessions.set(persisted.id, {
                     ...persisted,
                     status,
-                    // For interrupted sessions, use the persisted endedAt
-                    // or fall back to startedAt so the UI shows a valid elapsed time
-                    endedAt: persisted.endedAt ?? (wasRunning ? persisted.startedAt : undefined),
+                    endedAt: persisted.endedAt,
                     modifiedFiles: [],
-                    ...(wasRunning && !persisted.endedAt
-                        ? { taskDescription: persisted.taskDescription
-                            ? `[interrupted] ${persisted.taskDescription}`
-                            : "[interrupted]" }
-                        : {}),
                 });
             }
 

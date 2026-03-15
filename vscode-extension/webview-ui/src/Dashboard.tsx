@@ -195,6 +195,16 @@ export function Dashboard() {
                                         {collapsedSections.completed ? "\u25B6" : "\u25BC"}
                                     </span>
                                     Completed ({completedSessions.length})
+                                    <button
+                                        className="clear-btn"
+                                        title="Clear completed sessions"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            vscode.postMessage({ type: "clear-completed" });
+                                        }}
+                                    >
+                                        Clear
+                                    </button>
                                 </h2>
                                 {!collapsedSections.completed && (
                                     <div className="cards-list">

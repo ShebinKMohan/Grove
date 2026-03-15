@@ -222,18 +222,25 @@ export class DashboardPanel implements vscode.Disposable {
             case "view-diff": {
                 const worktreePath = message.worktreePath as string;
                 const branch = message.branch as string;
-                const terminal = openTerminal(
-                    `Diff: ${branch}`,
-                    worktreePath
-                );
                 const config =
                     vscode.workspace.getConfiguration("grove");
                 const baseBranch = config.get<string>(
                     "defaultBaseBranch",
                     "main"
                 );
+                const safeBranch = sanitizeRefName(baseBranch);
+                const terminal = openTerminal(
+                    `Diff: ${branch}`,
+                    worktreePath
+                );
+                // Show all changes: committed vs base + uncommitted working tree
                 terminal.sendText(
-                    `git diff ${sanitizeRefName(baseBranch)}...HEAD --stat`
+                    `echo "── Committed changes vs ${safeBranch} ──" && ` +
+                    `git diff ${safeBranch}...HEAD --stat 2>/dev/null; ` +
+                    `echo "" && echo "── Uncommitted changes (working tree) ──" && ` +
+                    `git diff --stat; ` +
+                    `echo "" && echo "── Staged changes ──" && ` +
+                    `git diff --cached --stat`
                 );
                 break;
             }
@@ -246,6 +253,11 @@ export class DashboardPanel implements vscode.Disposable {
 
             case "dismiss-all-overlaps":
                 this.overlapDetector?.dismissAll();
+                break;
+
+            case "clear-completed":
+                this.sessionTracker.clearCompletedSessions();
+                await this.sendUpdate();
                 break;
 
             case "refresh":
@@ -345,11 +357,26 @@ export class DashboardPanel implements vscode.Disposable {
             ): void => {
                 // Normalize to forward slashes for cross-platform consistency
                 const relativePath = path.relative(session.worktreePath, uri.fsPath).replace(/\\/g, "/");
-                if (relativePath.startsWith(".git")) return;
-                // Skip node_modules, __pycache__, etc.
+
+                // Skip .git directory, node_modules, build artifacts, and temp files
+                if (relativePath.startsWith(".git") || relativePath.includes("/.git/")) return;
                 if (
                     relativePath.includes("node_modules") ||
-                    relativePath.includes("__pycache__")
+                    relativePath.includes("__pycache__") ||
+                    relativePath.includes(".cache")
+                ) {
+                    return;
+                }
+                // Skip git temp files (*.git, *.lock, *.orig, *.swp, ~* backup files)
+                const fileName = path.basename(relativePath);
+                if (
+                    fileName.endsWith(".git") ||
+                    fileName.endsWith(".lock") ||
+                    fileName.endsWith(".orig") ||
+                    fileName.endsWith(".swp") ||
+                    fileName.endsWith(".tmp") ||
+                    fileName.startsWith("~") ||
+                    fileName.startsWith(".#")
                 ) {
                     return;
                 }

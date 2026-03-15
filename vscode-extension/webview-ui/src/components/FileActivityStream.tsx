@@ -44,9 +44,18 @@ export function FileActivityStream({ changes }: FileActivityStreamProps) {
 }
 
 function BranchGroup({ group }: { group: GroupedChanges }) {
+    const deduplicated = useMemo(
+        () => deduplicateChanges(group.changes),
+        [group.changes]
+    );
+
     const stats = useMemo(() => {
+        // Count unique files, not raw events
+        const files = new Set<string>();
         let created = 0, modified = 0, deleted = 0;
         for (const c of group.changes) {
+            if (files.has(c.filePath)) continue;
+            files.add(c.filePath);
             if (c.changeType === "created") created++;
             else if (c.changeType === "modified") modified++;
             else deleted++;
@@ -71,15 +80,15 @@ function BranchGroup({ group }: { group: GroupedChanges }) {
                 </span>
             </div>
             <div className="activity-branch-items">
-                {group.changes.map((change) => (
-                    <FileChangeRow key={`${group.branch}-${change.filePath}-${change.timestamp}`} change={change} />
+                {deduplicated.map((change, i) => (
+                    <FileChangeRow key={`${group.branch}-${change.filePath}-${i}`} change={change} />
                 ))}
             </div>
         </div>
     );
 }
 
-function FileChangeRow({ change }: { change: FileChange }) {
+function FileChangeRow({ change }: { change: FileChange & { repeatCount?: number } }) {
     const time = new Date(change.timestamp).toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
@@ -93,6 +102,8 @@ function FileChangeRow({ change }: { change: FileChange }) {
               ? "Deleted"
               : "Modified";
 
+    const repeat = change.repeatCount ?? 1;
+
     return (
         <div className="activity-row">
             <span className="activity-time">{time}</span>
@@ -102,14 +113,47 @@ function FileChangeRow({ change }: { change: FileChange }) {
             <span className="activity-filepath" title={change.filePath}>
                 {change.filePath}
             </span>
+            {repeat > 1 && (
+                <span className="activity-repeat" title={`${repeat} consecutive changes`}>
+                    x{repeat}
+                </span>
+            )}
         </div>
     );
+}
+
+/**
+ * Deduplicate consecutive changes to the same file within a time window.
+ * If the same file is modified 20 times in a row, collapse to one entry
+ * showing the latest timestamp and a repeat count.
+ */
+function deduplicateChanges(changes: FileChange[]): (FileChange & { repeatCount?: number })[] {
+    if (changes.length === 0) return [];
+
+    const result: (FileChange & { repeatCount?: number })[] = [];
+    let current = { ...changes[0], repeatCount: 1 };
+
+    for (let i = 1; i < changes.length; i++) {
+        const c = changes[i];
+        if (
+            c.filePath === current.filePath &&
+            c.changeType === current.changeType &&
+            c.branch === current.branch
+        ) {
+            // Same file, same type — just increment the count
+            current.repeatCount = (current.repeatCount ?? 1) + 1;
+        } else {
+            result.push(current);
+            current = { ...c, repeatCount: 1 };
+        }
+    }
+    result.push(current);
+    return result;
 }
 
 function groupByBranch(changes: FileChange[]): GroupedChanges[] {
     const map = new Map<string, GroupedChanges>();
     for (const change of changes) {
-        // Key by both branch and worktreePath to avoid collisions
         const key = `${change.branch}::${change.worktreePath}`;
         let group = map.get(key);
         if (!group) {

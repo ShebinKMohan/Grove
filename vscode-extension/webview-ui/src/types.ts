@@ -60,5 +60,6 @@ export type WebViewMessage =
     | { type: "view-diff"; worktreePath: string; branch: string }
     | { type: "dismiss-overlap"; filePath: string }
     | { type: "dismiss-all-overlaps" }
+    | { type: "clear-completed" }
     | { type: "refresh" }
     | { type: "ready" };

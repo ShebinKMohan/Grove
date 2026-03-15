@@ -356,6 +356,34 @@ async function activateWithRepo(
         sessionTracker.onDidChangeSessions(() => void updateStatusBar())
     );
 
+    // ── Periodic sidebar refresh for elapsed timers ──────────
+    // The sidebar shows "Running · 21s" but TreeView items are static —
+    // they only update on refresh(). This interval ticks the timers
+    // every 30s while sessions are active.
+    let timerInterval: NodeJS.Timeout | undefined;
+
+    function startTimerRefresh(): void {
+        if (timerInterval) return;
+        timerInterval = setInterval(() => {
+            if (sessionTracker.activeCount > 0) {
+                unifiedProvider.refresh();
+            } else {
+                // No active sessions — stop the interval
+                clearInterval(timerInterval!);
+                timerInterval = undefined;
+            }
+        }, 30_000);
+    }
+
+    context.subscriptions.push(
+        sessionTracker.onDidChangeSessions(() => {
+            if (sessionTracker.activeCount > 0) {
+                startTimerRefresh();
+            }
+        }),
+        { dispose: () => { if (timerInterval) clearInterval(timerInterval); } }
+    );
+
     // ── Commands ────────────────────────────────────────────
 
     // Create Worktree (streamlined single-input flow)
