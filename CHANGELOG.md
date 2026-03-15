@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.4.0] - 2026-03-16
+
+### Added
+- **Pre-merge conflict prediction** — merge report now predicts conflicts against the base branch using `git merge-tree` (exact, Git 2.38+) with a file-overlap heuristic fallback. Shows "Predicted Merge Conflicts" and "Files Changed on Both Base & Branch" sections before you merge
+- **Conflict warning before merge execution** — executing a merge sequence now runs conflict prediction first and shows a modal warning with the conflicting files, with options to proceed, view the full report, or cancel
+- **Push to Remote button** — cloud-upload icon appears on worktrees that are ahead of remote. Pushes with `-u` flag to set up tracking. Handles rejected pushes with helpful messaging
+- **Refresh fetches remote** — the sidebar Refresh button now runs `git fetch --all --prune` so ahead/behind counts are up to date and sync/push buttons appear correctly
+- **`.gitignore` auto-management** — worktree paths are now committed to `.gitignore` immediately on creation and removed + committed on deletion, keeping the base branch always clean
+
+### Changed
+- **Dashboard layout** — session cards now use a two-column grid layout instead of a single column, making better use of space when monitoring multiple sessions
+- **File Activity redesigned** — replaced the raw chronological event log with a directory-grouped summary view: files are grouped by directory in a collapsible tree, each file shown once with its latest status (+/~/−) and an edit count badge. Noise files (`.tmp.*`, `.swp`, `.DS_Store`) are automatically filtered out
+- **Clickable file activity** — clicking any file in the Activity tab opens VS Code's diff editor comparing the base branch version against the current worktree version
+- **File activity persists across reload** — changes are now buffered on the extension side and replayed when the dashboard reconnects, so reloading the panel no longer clears the activity history
+- **Sync button conditional visibility** — the "Sync from Remote" button now only appears on worktrees that are behind the remote, acting as a visual indicator that a sync is needed
+- **Push button conditional visibility** — the "Push to Remote" button only appears on worktrees that are ahead of the remote
+- **Session launch streamlined** — removed the task description prompt from the Claude Code launch flow. Sessions start immediately. Users can still set a task description later via right-click → "Set Task Description"
+- **Removed elapsed timer** — the wall-clock timer on session cards and sidebar was misleading (it counted time even when Claude was idle). Removed from dashboard cards, sidebar descriptions, and tooltips
+- **Completed sessions deduplicated** — dashboard shows only the most recent completed session per worktree instead of accumulating duplicates
+- **View Changes on main** — now shows uncommitted and staged changes only, instead of a meaningless `main...HEAD` diff
+- **View Changes on deleted worktree** — shows a warning message instead of a terminal error when the directory no longer exists
+- **Noise files filtered from sidebar** — `node_modules/`, `dist/`, `.vite/`, `__pycache__/`, `.next/`, `.nuxt/`, `coverage/`, `.cache/` files are hidden from the changed files list
+
+### Removed
+- **"Show in Explorer" / "Hide from Explorer"** — removed the workspace folder integration that caused VS Code to switch to multi-root workspace mode ("UNTITLED (WORKSPACE)"). Worktrees can still be accessed via "Open in New Window" or "Open in Terminal"
+
 ## [0.3.1] - 2026-03-15
 
 ### Fixed

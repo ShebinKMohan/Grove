@@ -100,6 +100,7 @@ const ALL_COMMAND_IDS: readonly string[] = [
     "grove.generateMergeReport",
     "grove.executeMergeSequence",
     "grove.syncWorktree",
+    "grove.pushWorktree",
     "grove.quickMenu",
     "grove.openFileDiff",
 ] as const;
@@ -1100,6 +1101,48 @@ async function activateWithRepo(
                     } else {
                         void showAutoError(
                             formatErrorForUser(err, `Failed to sync '${wt.branch}'`)
+                        );
+                    }
+                }
+            }
+        )
+    );
+
+    // Push Worktree — push commits to remote
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            "grove.pushWorktree",
+            async (item?: WorktreeItem) => {
+                if (!item?.worktree) return;
+                const wt = item.worktree;
+
+                try {
+                    await vscode.window.withProgress(
+                        {
+                            location: vscode.ProgressLocation.Notification,
+                            title: `Pushing ${wt.branch}...`,
+                            cancellable: false,
+                        },
+                        async () => {
+                            await gitWrite(
+                                ["push", "-u", "origin", wt.branch],
+                                wt.path
+                            );
+                        }
+                    );
+                    refreshAll();
+                    void showAutoInfo(
+                        `Pushed '${wt.branch}' to remote.`
+                    );
+                } catch (err) {
+                    const raw = err instanceof Error ? err.message : String(err);
+                    if (raw.includes("rejected") || raw.includes("non-fast-forward")) {
+                        void showAutoWarning(
+                            `Push rejected for '${wt.branch}'. Remote has changes you don't have.\n\nFix: Sync from remote first, then push again.`
+                        );
+                    } else {
+                        void showAutoError(
+                            formatErrorForUser(err, `Failed to push '${wt.branch}'`)
                         );
                     }
                 }

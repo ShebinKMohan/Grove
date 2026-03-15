@@ -489,10 +489,20 @@ Step 4 ─ Cleanup
 - Auto-stashes uncommitted changes, pulls, then reapplies them — no code is lost
 - Also available via right-click → "Sync from Remote" (only shown when behind)
 
+**Push to Remote:**
+- The cloud-upload icon appears only when a worktree is ahead of the remote
+- Runs `git push -u origin <branch>` to push and set up tracking
+- Handles rejected pushes with a helpful "sync first" message
+
 **Ahead/Behind Indicators:**
 - Each worktree shows `↓3` (behind remote) and `↑1` (ahead of remote) in the sidebar
-- Counts update every time the sidebar refreshes
+- Counts update when you click the Refresh button (which runs `git fetch --all --prune`)
 - Tooltip shows detailed sync status
+
+**`.gitignore` Auto-Management:**
+- Worktree paths are added to `.gitignore` and committed immediately when a worktree is created
+- Entries are removed from `.gitignore` and committed when a worktree is deleted
+- The base branch stays clean at all times — no uncommitted `.gitignore` changes to block merges
 
 **Branch Strategy Resolution:**
 - If local branch exists: uses it
@@ -673,7 +683,16 @@ For each worktree, computes:
 - REVIEW.md findings (if reviewer agent wrote one)
 - HANDOFF.md notes (if agent flagged cross-team dependencies)
 
-**Overlap Analysis:**
+**Pre-Merge Conflict Prediction:**
+Before merging, Grove predicts conflicts against the base branch:
+- Uses `git merge-tree --write-tree` (Git 2.38+) for exact conflict detection without modifying the working tree
+- Falls back to file-overlap heuristic on older Git: finds files changed on both the base branch and the worktree branch since they diverged
+- The merge report shows two sections:
+  - "Predicted Merge Conflicts" — files that WILL conflict (confirmed by merge-tree)
+  - "Files Changed on Both Base & Branch" — files that may or may not conflict
+- When executing a merge sequence, a modal warning appears if conflicts are predicted, with options to proceed, view the full report, or cancel
+
+**Worktree-to-Worktree Overlap Analysis:**
 - Files modified in multiple worktrees identified
 - Classification:
   - Auto-resolvable: config files with independent changes
@@ -1038,6 +1057,7 @@ All commands are available via `Cmd+Shift+P` (macOS) or `Ctrl+Shift+P` (Windows/
 | Command | Icon | Where |
 |---------|------|-------|
 | `Grove: Sync from Remote` | `$(cloud-download)` | Worktree inline icon (only when behind remote), right-click menu |
+| `Grove: Push to Remote` | `$(cloud-upload)` | Worktree inline icon (only when ahead of remote), right-click menu |
 | `Grove: Launch Claude Code in Worktree` | `$(rocket)` | Worktree inline icon |
 | `Grove: Open in Terminal` | `$(terminal)` | Worktree inline icon |
 | `Grove: Delete Worktree` | — | Worktree right-click menu |

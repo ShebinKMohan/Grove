@@ -362,10 +362,13 @@ export class WorktreeItem extends vscode.TreeItem {
     }
 
     private resolveContextValue(): string {
-        const behind = this.worktree.behind > 0 ? "-behind" : "";
-        if (this.worktree.isMain) return `worktree-main${behind}`;
-        if (this.hasActiveSession) return `worktree-with-session${behind}`;
-        return `worktree${behind}`;
+        const suffixes: string[] = [];
+        if (this.worktree.behind > 0) suffixes.push("behind");
+        if (this.worktree.ahead > 0) suffixes.push("ahead");
+        const suffix = suffixes.length > 0 ? `-${suffixes.join("-")}` : "";
+        if (this.worktree.isMain) return `worktree-main${suffix}`;
+        if (this.hasActiveSession) return `worktree-with-session${suffix}`;
+        return `worktree${suffix}`;
     }
 
     private buildDescription(): string {

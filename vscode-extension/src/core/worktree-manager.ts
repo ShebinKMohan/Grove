@@ -13,7 +13,7 @@ import {
     branchExistsLocally,
     branchExistsOnRemote,
 } from "../utils/git";
-import { ensureGitignored } from "./gitignore";
+import { ensureGitignored, removeFromGitignore } from "./gitignore";
 import { installDependencies, type PackageManager } from "../utils/package-manager";
 import { log } from "../utils/logger";
 import {
@@ -382,10 +382,20 @@ export async function createWorktree(
         throwFriendlyWorktreeError(err, strategy.branch, wtPath);
     }
 
-    // Auto-gitignore
+    // Auto-gitignore — commit immediately so the base branch stays clean
+    // and doesn't block future merges with uncommitted changes.
     if (options.autoGitignore !== false) {
         if (ensureGitignored(repoRoot, wtPath)) {
-            log("Added worktree path to .gitignore");
+            try {
+                await gitWrite(["add", ".gitignore"], repoRoot);
+                await gitWrite(
+                    ["commit", "-m", `chore: gitignore worktree path for ${branchName}`],
+                    repoRoot
+                );
+                log("Committed .gitignore update for worktree path");
+            } catch {
+                log("Could not auto-commit .gitignore (may already be committed)");
+            }
         }
     }
 
@@ -452,10 +462,20 @@ export async function removeWorktree(
 
     const result: CleanupResult = { path: wtPath, removed: true };
 
-    // NOTE: We intentionally do NOT remove the .gitignore entry here.
-    // Stale gitignore patterns are harmless (they match nothing), but
-    // modifying .gitignore after a merge dirties the working tree on
-    // the base branch — which is far worse.
+    // Remove the .gitignore entry and commit the change so the
+    // base branch stays clean and doesn't block future merges.
+    if (removeFromGitignore(repoRoot, wtPath)) {
+        try {
+            await gitWrite(["add", ".gitignore"], repoRoot);
+            await gitWrite(
+                ["commit", "-m", `chore: remove gitignore entry for deleted worktree`],
+                repoRoot
+            );
+            log("Committed .gitignore cleanup after worktree removal");
+        } catch {
+            log("Could not auto-commit .gitignore cleanup");
+        }
+    }
 
     // Optionally delete branch
     if (

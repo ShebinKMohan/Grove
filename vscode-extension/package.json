@@ -188,6 +188,12 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "grove.pushWorktree",
+        "title": "Push to Remote",
+        "category": "Grove",
+        "icon": "$(cloud-upload)"
+      },
+      {
         "command": "grove.quickMenu",
         "title": "Quick Menu",
         "category": "Grove",
@@ -262,18 +268,23 @@
       "view/item/context": [
         {
           "command": "grove.launchSession",
-          "when": "viewItem =~ /^worktree(-behind)?$/ || viewItem =~ /^worktree-main(-behind)?$/",
+          "when": "viewItem =~ /^worktree(-|$)/ && viewItem != worktree-with-session && viewItem =~ /^worktree(-main)?/",
           "group": "inline@1"
         },
         {
           "command": "grove.syncWorktree",
-          "when": "viewItem =~ /-behind$/",
+          "when": "viewItem =~ /^worktree/ && viewItem =~ /behind/",
           "group": "inline@2"
+        },
+        {
+          "command": "grove.pushWorktree",
+          "when": "viewItem =~ /^worktree/ && viewItem =~ /ahead/",
+          "group": "inline@3"
         },
         {
           "command": "grove.openInTerminal",
           "when": "viewItem =~ /^worktree/",
-          "group": "inline@3"
+          "group": "inline@4"
         },
         {
           "command": "grove.openInNewWindow",
@@ -282,12 +293,17 @@
         },
         {
           "command": "grove.launchSession",
-          "when": "viewItem =~ /^worktree(-behind)?$/ || viewItem =~ /^worktree-main(-behind)?$/",
+          "when": "viewItem =~ /^worktree(-|$)/ && viewItem != worktree-with-session && viewItem =~ /^worktree(-main)?/",
           "group": "1_open"
         },
         {
           "command": "grove.syncWorktree",
-          "when": "viewItem =~ /-behind$/",
+          "when": "viewItem =~ /^worktree/ && viewItem =~ /behind/",
+          "group": "2_inspect"
+        },
+        {
+          "command": "grove.pushWorktree",
+          "when": "viewItem =~ /^worktree/ && viewItem =~ /ahead/",
           "group": "2_inspect"
         },
         {
@@ -297,7 +313,7 @@
         },
         {
           "command": "grove.deleteWorktree",
-          "when": "viewItem =~ /^worktree(-behind)?$/ || viewItem =~ /^worktree-with-session(-behind)?$/",
+          "when": "viewItem =~ /^worktree/ && viewItem =~ /^worktree(?!-main)/",
           "group": "3_manage"
         },
         {
@@ -352,6 +368,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "grove.pushWorktree",
+          "when": "false"
+        },
         {
           "command": "grove.syncWorktree",
           "when": "false"

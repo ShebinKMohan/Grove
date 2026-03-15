@@ -11,9 +11,11 @@ Built for developers who use [Claude Code](https://code.claude.com) and want to 
 - **One-click agent teams** — pick a template (Full-Stack, Code Review, Debug Squad, Migration, Rapid Prototype), enter your task, and Grove creates isolated worktrees, generates per-agent CLAUDE.md files with enforced ownership boundaries, and launches all sessions in parallel
 - **Base branch selection** — choose which branch to create worktrees from, with all local branches listed (default base branch first)
 - **Inline file browsing** — expand any worktree in the sidebar to see changed files with git status icons (added/modified/deleted/renamed). Click a modified file to open an inline diff view against the base branch
-- **Smart sync indicator** — the sync button only appears on worktrees that are behind the remote, so you know at a glance which branches need pulling
+- **Smart sync & push indicators** — sync button appears when behind remote, push button appears when ahead. You know at a glance which branches need pulling or pushing
+- **Pre-merge conflict prediction** — before merging, Grove predicts conflicts against the base branch using `git merge-tree` and warns you with the exact files that will conflict
 - **Real-time overlap detection** — file watchers monitor every worktree and alert you the moment two agents touch the same file, ranked by severity (conflict / warning / info)
 - **Merge intelligence** — auto-commits tracked changes, captures a recovery hash, and walks you through sequential merges with conflict resolution, test gates, and abort safety
+- **Clean `.gitignore` management** — worktree paths are auto-committed to `.gitignore` on creation and cleaned up on deletion, keeping your base branch always clean
 - **Live dashboard** — WebView panel with two-column session cards, directory-grouped file activity with clickable diffs, and overlap alerts. Teams persist across restarts
 - **Worktree management** — create, monitor, sync, diff, and clean up worktrees without leaving your editor
 - **User-friendly errors** — every error includes what went wrong and how to fix it. No raw git output or cryptic stack traces

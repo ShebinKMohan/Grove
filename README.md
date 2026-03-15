@@ -11,10 +11,12 @@ Built for developers who use [Claude Code](https://code.claude.com) and want to 
 - **One-click agent teams** — pick a template (Full-Stack, Code Review, Debug Squad, Migration, Rapid Prototype), enter your task, and Grove creates isolated worktrees, generates per-agent CLAUDE.md files with enforced ownership boundaries, and launches all sessions in parallel
 - **Base branch selection** — choose which branch to create worktrees from, with all local branches listed (default base branch first)
 - **Inline file browsing** — expand any worktree in the sidebar to see changed files with git status icons (added/modified/deleted/renamed). Click a modified file to open an inline diff view against the base branch
-- **Show in Explorer** — right-click a worktree and select "Show in Explorer" to add it as a workspace folder for full file management (create, edit, rename, delete)
+- **Smart sync & push indicators** — sync button appears when behind remote, push button appears when ahead. You know at a glance which branches need pulling or pushing
+- **Pre-merge conflict prediction** — before merging, Grove predicts conflicts against the base branch using `git merge-tree` and warns you with the exact files that will conflict
 - **Real-time overlap detection** — file watchers monitor every worktree and alert you the moment two agents touch the same file, ranked by severity (conflict / warning / info)
 - **Merge intelligence** — auto-commits tracked changes, captures a recovery hash, and walks you through sequential merges with conflict resolution, test gates, and abort safety
-- **Live dashboard** — WebView panel with agent cards, file activity feed, and overlap alerts. Teams persist across restarts
+- **Clean `.gitignore` management** — worktree paths are auto-committed to `.gitignore` on creation and cleaned up on deletion, keeping your base branch always clean
+- **Live dashboard** — WebView panel with two-column session cards, directory-grouped file activity with clickable diffs, and overlap alerts. Teams persist across restarts
 - **Worktree management** — create, monitor, sync, diff, and clean up worktrees without leaving your editor
 - **User-friendly errors** — every error includes what went wrong and how to fix it. No raw git output or cryptic stack traces
 
@@ -38,10 +40,9 @@ code --install-extension ShebinMohanK.grove-pilot
 3. Hit **+** to create a worktree — pick a base branch, then name your new branch
 4. Click the rocket icon to launch Claude Code in the worktree
 5. Expand the worktree to see changed files and inline diffs
-6. Right-click → "Show in Explorer" to browse/edit files in VS Code's Explorer
-7. Launch an agent team with the team icon for parallel development
-8. Open the dashboard (`Grove: Open Dashboard`) to monitor in real-time
-9. When agents finish, generate a merge report and execute the guided merge sequence
+6. Launch an agent team with the team icon for parallel development
+7. Open the dashboard (`Grove: Open Dashboard`) to monitor in real-time
+8. When agents finish, generate a merge report and execute the guided merge sequence
 
 ## Commands
 

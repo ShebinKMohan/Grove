@@ -1,6 +1,6 @@
 # Grove — Worktree Control for Claude Code
 
-> **Version:** 0.3.1
+> **Version:** 0.4.0
 > **Type:** VS Code / Cursor Extension
 > **License:** MIT
 
@@ -288,8 +288,8 @@ The dashboard opens as a WebView tab with three sections:
 
 | Tab | Badge | Content |
 |-----|-------|---------|
-| Sessions | — | Active and completed agent cards with elapsed time, file counts, actions |
-| Activity | — | Real-time feed of file changes across all worktrees |
+| Sessions | — | Active and completed agent cards in a two-column grid with file counts and actions |
+| Activity | — | Directory-grouped file summary with clickable diffs, noise filtered |
 | Overlaps | Count | List of files modified in multiple worktrees, sorted by severity |
 
 ### Dashboard Session Cards
@@ -328,7 +328,7 @@ Step 2 ─ Launch Claude Code
 Step 3 ─ Monitor
   Sidebar: Workflow hint shows "1 session running — Open Dashboard"
   Dashboard: See files being modified in real-time
-  Sidebar: Session appears as child of the worktree with elapsed time
+  Sidebar: Session appears as child of the worktree with status
 
 Step 4 ─ Review
   Sidebar: Right-click worktree → "View Diff"
@@ -465,11 +465,6 @@ Step 4 ─ Cleanup
 - **Click a modified file** to open VS Code's side-by-side diff editor (base branch vs worktree)
 - **Click an added file** to open it directly
 
-**Show in Explorer:**
-- Right-click a worktree → "Show in Explorer" to add it as a workspace folder
-- Gives you full file management in VS Code's Explorer: create, rename, delete, drag-drop
-- "Hide from Explorer" to remove when done
-
 **Delete Worktree:**
 - Safety check: warns if there are uncommitted changes or active sessions
 - Options: "Delete Worktree Only" or "Delete + Local Branch" (clearly labeled — remote branch is never touched)
@@ -489,15 +484,25 @@ Step 4 ─ Cleanup
 - Skips protected branches
 
 **Sync from Remote:**
-- Click the cloud-download icon on any worktree to pull latest changes
+- The cloud-download icon appears only when a worktree is behind the remote — it acts as a visual indicator
 - Runs `git fetch --all --prune` then `git pull --rebase --autostash`
 - Auto-stashes uncommitted changes, pulls, then reapplies them — no code is lost
-- Also available via right-click → "Sync from Remote"
+- Also available via right-click → "Sync from Remote" (only shown when behind)
+
+**Push to Remote:**
+- The cloud-upload icon appears only when a worktree is ahead of the remote
+- Runs `git push -u origin <branch>` to push and set up tracking
+- Handles rejected pushes with a helpful "sync first" message
 
 **Ahead/Behind Indicators:**
 - Each worktree shows `↓3` (behind remote) and `↑1` (ahead of remote) in the sidebar
-- Counts update every time the sidebar refreshes
+- Counts update when you click the Refresh button (which runs `git fetch --all --prune`)
 - Tooltip shows detailed sync status
+
+**`.gitignore` Auto-Management:**
+- Worktree paths are added to `.gitignore` and committed immediately when a worktree is created
+- Entries are removed from `.gitignore` and committed when a worktree is deleted
+- The base branch stays clean at all times — no uncommitted `.gitignore` changes to block merges
 
 **Branch Strategy Resolution:**
 - If local branch exists: uses it
@@ -510,7 +515,7 @@ Step 4 ─ Cleanup
 
 **Session Lifecycle:**
 1. **Launch** — click rocket icon or "Launch Claude Code" on a worktree
-2. **Running** — terminal is active, session timer counting
+2. **Running** — terminal is active, Claude Code working
 3. **Idle** — terminal open but Claude waiting for input
 4. **Completed** — terminal closed normally
 5. **Error** — terminal closed with error state
@@ -519,7 +524,7 @@ Step 4 ─ Cleanup
 - Branch name and worktree path
 - Task description (user-settable via right-click → "Set Task Description")
 - Modified files list (refreshed via `git diff --name-only`)
-- Start time and elapsed duration
+- Start time
 - Terminal instance reference
 
 **Persistence:**
@@ -678,7 +683,16 @@ For each worktree, computes:
 - REVIEW.md findings (if reviewer agent wrote one)
 - HANDOFF.md notes (if agent flagged cross-team dependencies)
 
-**Overlap Analysis:**
+**Pre-Merge Conflict Prediction:**
+Before merging, Grove predicts conflicts against the base branch:
+- Uses `git merge-tree --write-tree` (Git 2.38+) for exact conflict detection without modifying the working tree
+- Falls back to file-overlap heuristic on older Git: finds files changed on both the base branch and the worktree branch since they diverged
+- The merge report shows two sections:
+  - "Predicted Merge Conflicts" — files that WILL conflict (confirmed by merge-tree)
+  - "Files Changed on Both Base & Branch" — files that may or may not conflict
+- When executing a merge sequence, a modal warning appears if conflicts are predicted, with options to proceed, view the full report, or cancel
+
+**Worktree-to-Worktree Overlap Analysis:**
 - Files modified in multiple worktrees identified
 - Classification:
   - Auto-resolvable: config files with independent changes
@@ -734,16 +748,17 @@ Checks (in order): `package.json` scripts, `pytest.ini`, `go.mod`, `Cargo.toml`
 **What:** Real-time monitoring panel showing all agents, file activity, and overlaps.
 
 **Sessions Tab:**
-- Active session cards with live elapsed time
-- Completed session cards
-- Each card shows: branch, status, task, file count, elapsed time
+- Two-column grid of session cards for active and completed sessions
+- Each card shows: branch, status, task, file count, start time
 - Actions: Open Terminal, View Changes, Stop Session
 - Sections are collapsible with expand/collapse arrows
 
 **Activity Tab:**
-- Real-time feed of every file change across all active worktrees
-- Each entry: timestamp, worktree name, file path, change type (created/modified/deleted)
-- Helps you see exactly what each agent is doing at a glance
+- Files grouped by directory in a collapsible tree view per branch
+- Each file shown once with its latest status (+/~/−) and edit count
+- Noise files (`.tmp.*`, `.swp`, `.DS_Store`) automatically filtered out
+- Click any file to open VS Code's diff editor (base branch vs worktree)
+- Activity persists across dashboard reloads
 
 **Overlaps Tab:**
 - All detected file overlaps, sorted by severity
@@ -942,7 +957,7 @@ Grove is designed to work alongside Claude Code, not replace it. Here's how the 
 ### Do
 
 - **Start with a solo worktree** before jumping to teams. Get comfortable with the create → launch → merge flow first.
-- **Write detailed task descriptions** when launching teams. The task description goes into every agent's CLAUDE.md — the more context, the better the output.
+- **Write detailed task descriptions** when launching teams. The task description goes into every agent's CLAUDE.md — the more context, the better the output. For individual sessions, you can set a task description later via right-click → "Set Task Description".
 - **Check the Overlaps tab** periodically during team runs. Early detection saves hours of merge conflict resolution.
 - **Use the merge report** before executing merges. It tells you exactly what will happen and highlights potential conflicts.
 - **Use Code Review Team** for important PRs. Three perspectives (security, performance, architecture) catch things humans miss.
@@ -1041,11 +1056,10 @@ All commands are available via `Cmd+Shift+P` (macOS) or `Ctrl+Shift+P` (Windows/
 
 | Command | Icon | Where |
 |---------|------|-------|
-| `Grove: Sync from Remote` | `$(cloud-download)` | Worktree inline icon, right-click menu |
+| `Grove: Sync from Remote` | `$(cloud-download)` | Worktree inline icon (only when behind remote), right-click menu |
+| `Grove: Push to Remote` | `$(cloud-upload)` | Worktree inline icon (only when ahead of remote), right-click menu |
 | `Grove: Launch Claude Code in Worktree` | `$(rocket)` | Worktree inline icon |
 | `Grove: Open in Terminal` | `$(terminal)` | Worktree inline icon |
-| `Grove: Show in Explorer` | `$(folder-opened)` | Worktree right-click menu |
-| `Grove: Hide from Explorer` | — | Worktree right-click menu |
 | `Grove: Delete Worktree` | — | Worktree right-click menu |
 | `Grove: View Diff` | — | Worktree right-click menu |
 | `Grove: Open in New Window` | — | Worktree right-click menu |
