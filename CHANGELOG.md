@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.3.0] - 2026-03-15
+
+### Added
+- **Base branch picker** — worktree creation now asks which branch to create from, showing all local branches sorted by most recent (default base branch first, current branch second)
+- **Inline file browsing** — worktree items in the sidebar are now expandable, showing all changed files (committed + uncommitted) with color-coded git status icons (added/modified/deleted/renamed)
+- **Inline diff view** — clicking a modified file opens VS Code's side-by-side diff editor comparing the base branch version against the current worktree version
+- **Show in Explorer** — new "Show in Explorer" context menu action adds a worktree as a workspace folder in VS Code's Explorer for full file management (create, edit, rename, delete files)
+- **Hide from Explorer** — companion action to remove a worktree from the workspace
+- **Claude Code detection** — pre-flight check before launching sessions; shows install instructions with "Retry" button if `claude` CLI is not found
+- **Comprehensive error handling** — every error shown to users now includes what went wrong and how to fix it; `formatErrorForUser()` pattern-matches 15+ common failure scenarios (git not installed, repo locked, permission denied, disk full, branch conflicts, etc.)
+- **Graceful activation failures** — if the extension can't activate (no folder open, not a git repo, git not installed, unexpected crash), all commands show a helpful error message instead of VS Code's cryptic "command not found"
+- `removeFromGitignore()` — worktree entries are now automatically cleaned from `.gitignore` when a worktree is deleted
+- `listLocalBranches()` git utility for branch picker
+- `getChangedFilesWithStatus()` returns file status (added/modified/deleted/renamed) alongside paths
+- `grove-git:` URI scheme and `TextDocumentContentProvider` for rendering base-branch file contents in diff views
+
+### Changed
+- **Delete worktree dialog** — buttons now read "Delete Worktree Only" and "Delete + Local Branch" (was ambiguous "Delete + Branch")
+- **Cleanup wizard** — now reports which specific worktrees failed to remove instead of silently swallowing errors
+- **Merge error messages** — `humanizeMergeError()` translates raw git merge errors (unrelated histories, lock files, missing branches, etc.) into plain English
+- **Git error stripping** — `fatal:` and `error:` prefixes are stripped from git stderr before display
+- **Sync error messages** — "no tracking information" and "rebase conflict" errors now include fix instructions
+- **Team launch errors** — worktree creation failures during team launch use `formatErrorForUser()` instead of raw error messages
+- **Agent Teams env var** — failure to set `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` now warns the user instead of silently failing
+- **Template parse errors** — invalid template files are now logged with filename and reason instead of silently skipped
+
+### Fixed
+- Extension activation crash when workspace is not a git repo — commands were never registered, causing "command not found" errors
+- Silent failure when `launchClaude()` returned undefined (Claude not installed)
+- Silent failure in overlap detector scan — errors now logged
+- Silent failure in session tracker file list refresh — errors now logged
+- Silent failure in branch deletion during worktree removal — errors now logged
+
+### Removed (dead code cleanup)
+- Unused error classes: `ClaudeNotFoundError`, `GitNotFoundError`, `NotAGitRepoError`, `MergeConflictError`, `SessionLimitError` (replaced by `formatErrorForUser()` pattern matching)
+- Unused `isClaudeInstalled()` function
+- Unused `MergeResult` interface
+- Unused `_repoRoot` parameter from `generateMergeReport()`
+- Reduced export surface: 20+ internal-only symbols changed from `export` to module-private
+
 ## [0.2.4] - 2026-03-15
 
 ### Added

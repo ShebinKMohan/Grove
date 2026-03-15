@@ -6,7 +6,8 @@
  */
 
 import * as vscode from "vscode";
-import { getRepoRoot, getCurrentBranch, git, gitWrite, sanitizeRefName } from "./utils/git";
+import * as path from "path";
+import { getRepoRoot, getCurrentBranch, listLocalBranches, git, gitWrite, sanitizeRefName } from "./utils/git";
 import { showAutoInfo, showAutoWarning, showAutoError } from "./ui/notifications";
 import {
     UnifiedTreeProvider,
@@ -43,7 +44,7 @@ import {
     postMergeCleanup,
     formatMergeReportMarkdown,
 } from "./core/merge-sequencer";
-import { GroveError } from "./utils/errors";
+import { formatErrorForUser } from "./utils/errors";
 import { log, logError, disposeLogger } from "./utils/logger";
 
 /** Read the user-configured protected branches list from VS Code settings. */
@@ -52,11 +53,67 @@ function getProtectedBranches(): string[] {
     return config.get<string[]>("protectedBranches", ["main", "master", "develop", "production"]);
 }
 
+/**
+ * All command IDs declared in package.json. When the workspace is not
+ * a git repo (or no folder is open) we still need to register them so
+ * VS Code doesn't show "command not found".
+ */
+const ALL_COMMAND_IDS: readonly string[] = [
+    "grove.createWorktree",
+    "grove.deleteWorktree",
+    "grove.cleanupWorktrees",
+    "grove.launchSession",
+    "grove.openDashboard",
+    "grove.openInTerminal",
+    "grove.openInNewWindow",
+    "grove.viewDiff",
+    "grove.stopSession",
+    "grove.stopAllSessions",
+    "grove.focusSession",
+    "grove.setTaskDescription",
+    "grove.clearCompletedSessions",
+    "grove.refreshSidebar",
+    "grove.launchTeam",
+    "grove.stopTeam",
+    "grove.stopAgent",
+    "grove.focusAgent",
+    "grove.cleanupTeam",
+    "grove.runOverlapCheck",
+    "grove.generateMergeReport",
+    "grove.executeMergeSequence",
+    "grove.syncWorktree",
+    "grove.quickMenu",
+    "grove.addToWorkspace",
+    "grove.removeFromWorkspace",
+    "grove.openFileDiff",
+] as const;
+
+/**
+ * Register all declared commands as no-ops that show a friendly error.
+ * Called when the extension cannot fully activate (no folder, no git repo,
+ * or an unexpected error) so VS Code never reports "command not found".
+ */
+function registerStubCommands(
+    context: vscode.ExtensionContext,
+    title: string,
+    detail: string
+): void {
+    for (const id of ALL_COMMAND_IDS) {
+        context.subscriptions.push(
+            vscode.commands.registerCommand(id, () => {
+                void vscode.window.showErrorMessage(
+                    `Grove — ${title}\n\n${detail}`,
+                    { modal: false }
+                );
+            })
+        );
+    }
+}
+
 export async function activate(
     context: vscode.ExtensionContext
 ): Promise<void> {
     log("Grove activating...");
-    initTemplateManager(context.extensionPath);
 
     // ── Tree Providers (register unconditionally) ─────────
     // Views declared in package.json must always be registered,
@@ -77,10 +134,15 @@ export async function activate(
 
     context.subscriptions.push(explorerView, completedView);
 
-    // Find workspace git repo
+    // ── Pre-flight: workspace & git ──────────────────────
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
         log("No workspace folder open");
+        registerStubCommands(
+            context,
+            "No folder open",
+            "Open a project folder (File → Open Folder) to use Grove."
+        );
         return;
     }
 
@@ -89,12 +151,66 @@ export async function activate(
     let repoRoot: string;
     try {
         repoRoot = await getRepoRoot(workspaceRoot);
-    } catch {
-        log("Not a git repository, extension inactive");
+    } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        const isGitMissing = detail.toLowerCase().includes("enoent") ||
+            detail.toLowerCase().includes("not found");
+
+        if (isGitMissing) {
+            log("git not found in PATH");
+            registerStubCommands(
+                context,
+                "Git not found",
+                "Grove requires git. Install git and make sure it is in your PATH, then reload the window (⇧⌘P → Reload Window)."
+            );
+            void vscode.window.showErrorMessage(
+                "Grove: git is not installed or not in your PATH. Install git and reload the window."
+            );
+        } else {
+            log(`Not a git repository: ${detail}`);
+            registerStubCommands(
+                context,
+                "Not a git repository",
+                "This folder is not a git repository. Run 'git init' in the terminal or open a folder that already has a .git directory, then reload the window."
+            );
+            void vscode.window.showWarningMessage(
+                "Grove is inactive — this folder is not a git repository. Run 'git init' or open a git project."
+            );
+        }
         return;
     }
 
     log(`Git repo found: ${repoRoot}`);
+
+    // ── Full initialization (wrapped to guarantee commands are registered) ──
+    try {
+        await activateWithRepo(context, repoRoot, unifiedProvider, completedProvider);
+    } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        logError("Grove failed to activate", err);
+        registerStubCommands(
+            context,
+            "Activation failed",
+            `Something went wrong during startup: ${detail}\n\nTry reloading the window (⇧⌘P → Reload Window). If this keeps happening, please report it at https://github.com/ShebinKMohan/Grove/issues`
+        );
+        void vscode.window.showErrorMessage(
+            `Grove failed to activate: ${detail}. Try reloading the window.`
+        );
+    }
+}
+
+/**
+ * Main activation logic — only called when a valid git repo has been found.
+ * Separated so that any error here is caught by the caller and turned into
+ * friendly stub commands instead of a cryptic "command not found".
+ */
+async function activateWithRepo(
+    context: vscode.ExtensionContext,
+    repoRoot: string,
+    unifiedProvider: UnifiedTreeProvider,
+    completedProvider: CompletedTreeProvider,
+): Promise<void> {
+    initTemplateManager(context.extensionPath);
 
     // ── Session Tracker ─────────────────────────────────────
 
@@ -135,6 +251,55 @@ export async function activate(
 
     completedProvider.setTracker(sessionTracker);
     completedProvider.setOrchestrator(orchestrator);
+
+    // ── Git Content Provider (for diff views) ────────────────
+
+    // Provides file contents at a specific git ref, used by the
+    // inline diff viewer to show the base branch version of a file.
+    const gitContentProvider = new (class implements vscode.TextDocumentContentProvider {
+        provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
+            // URI format: grove-git:/<worktreePath>?ref=<ref>&file=<relativePath>
+            const params = new URLSearchParams(uri.query);
+            const ref = params.get("ref") ?? "HEAD";
+            const file = params.get("file") ?? "";
+            const cwd = uri.path;
+            return git(["show", `${sanitizeRefName(ref)}:${file}`], cwd).catch(
+                () => `(file did not exist in ${ref})`
+            );
+        }
+    })();
+
+    context.subscriptions.push(
+        vscode.workspace.registerTextDocumentContentProvider(
+            "grove-git",
+            gitContentProvider
+        )
+    );
+
+    // grove.openFileDiff — opens VS Code's diff editor comparing
+    // the base branch version of a file against the current worktree version.
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            "grove.openFileDiff",
+            async (worktreePath: string, filePath: string, baseBranch: string) => {
+                const currentUri = vscode.Uri.file(
+                    path.join(worktreePath, filePath)
+                );
+                const baseUri = vscode.Uri.from({
+                    scheme: "grove-git",
+                    path: worktreePath,
+                    query: `ref=${encodeURIComponent(baseBranch)}&file=${encodeURIComponent(filePath)}`,
+                });
+                const title = `${path.basename(filePath)} (${baseBranch} ↔ worktree)`;
+                await vscode.commands.executeCommand(
+                    "vscode.diff",
+                    baseUri,
+                    currentUri,
+                    title
+                );
+            }
+        )
+    );
 
     // ── Status Bar ──────────────────────────────────────────
 
@@ -198,11 +363,59 @@ export async function activate(
         vscode.commands.registerCommand(
             "grove.createWorktree",
             async () => {
-                // Single input: branch name (e.g. feature/add-login)
+                const config =
+                    vscode.workspace.getConfiguration("grove");
+                const defaultBase = config.get<string>(
+                    "defaultBaseBranch",
+                    "main"
+                );
+
+                // Step 1: Pick the base branch to create the worktree from
+                const branches = await listLocalBranches(repoRoot);
+                // Put the default base branch first, then current branch
+                const currentBranch = await getCurrentBranch(repoRoot).catch(() => "");
+                const branchItems: vscode.QuickPickItem[] = [];
+                const seen = new Set<string>();
+
+                // Default base branch first
+                if (branches.includes(defaultBase)) {
+                    branchItems.push({
+                        label: defaultBase,
+                        description: "default base branch",
+                    });
+                    seen.add(defaultBase);
+                }
+                // Current branch second (if different)
+                if (currentBranch && !seen.has(currentBranch)) {
+                    branchItems.push({
+                        label: currentBranch,
+                        description: "current branch",
+                    });
+                    seen.add(currentBranch);
+                }
+                // Rest of local branches
+                for (const b of branches) {
+                    if (!seen.has(b)) {
+                        branchItems.push({ label: b });
+                        seen.add(b);
+                    }
+                }
+
+                const basePick = await vscode.window.showQuickPick(
+                    branchItems,
+                    {
+                        placeHolder: "Select the base branch to create the worktree from",
+                        title: "Grove: Base Branch",
+                    }
+                );
+                if (!basePick) return;
+                const baseBranch = basePick.label;
+
+                // Step 2: Enter new branch name
                 const branchName = await vscode.window.showInputBox({
-                    prompt: "Branch name for the new worktree",
+                    prompt: `New branch name (will be created from '${baseBranch}')`,
                     placeHolder:
-                        "Branch name, e.g. feature/add-login or fix/bug-123",
+                        "e.g. feature/add-login or fix/bug-123",
                     title: "Grove: Create Worktree",
                     validateInput: (value) => {
                         if (!value) return "Branch name cannot be empty.";
@@ -211,13 +424,6 @@ export async function activate(
                 });
                 if (!branchName) return;
 
-                // Smart defaults
-                const config =
-                    vscode.workspace.getConfiguration("grove");
-                const baseBranch = config.get<string>(
-                    "defaultBaseBranch",
-                    "main"
-                );
                 const worktreeDir = config.get<string>(
                     "worktreeLocation",
                     ".claude/worktrees"
@@ -273,15 +479,9 @@ export async function activate(
                     }
                 } catch (err) {
                     logError("Failed to create worktree", err);
-                    if (err instanceof GroveError) {
-                        void showAutoError(
-                            `${err.message}\n\nFix: ${err.fix}`
-                        );
-                    } else {
-                        void showAutoError(
-                            `Failed to create worktree: ${err instanceof Error ? err.message : String(err)}`
-                        );
-                    }
+                    void showAutoError(
+                        formatErrorForUser(err, "Failed to create worktree")
+                    );
                 }
             }
         )
@@ -342,13 +542,13 @@ export async function activate(
                             await vscode.window.showWarningMessage(
                                 `Delete worktree '${wt.branch}'?`,
                                 { modal: true },
-                                "Delete",
-                                "Delete + Branch"
+                                "Delete Worktree Only",
+                                "Delete + Local Branch"
                             );
                         if (!deleteBranch) return;
 
                         await removeWorktree(repoRoot, wt.path, {
-                            deleteBranch: deleteBranch === "Delete + Branch",
+                            deleteBranch: deleteBranch === "Delete + Local Branch",
                             protectedBranches: getProtectedBranches(),
                         });
                     }
@@ -358,9 +558,8 @@ export async function activate(
                         `Deleted worktree: ${wt.branch}`
                     );
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
                     void showAutoError(
-                        `Failed to delete worktree '${wt.branch}': ${msg}`
+                        formatErrorForUser(err, `Failed to delete worktree '${wt.branch}'`)
                     );
                 }
             }
@@ -376,8 +575,7 @@ export async function activate(
                 try {
                     worktrees = await listAllWorktrees(repoRoot);
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
-                    void showAutoError(`Failed to list worktrees: ${msg}`);
+                    void showAutoError(formatErrorForUser(err, "Failed to list worktrees"));
                     return;
                 }
                 const removable = worktrees.filter((wt) => !wt.isMain);
@@ -450,6 +648,7 @@ export async function activate(
                     },
                     async (progress) => {
                         let removed = 0;
+                        const failed: string[] = [];
                         for (const wt of toRemove) {
                             progress.report({
                                 message: `Removing ${wt.branch}...`,
@@ -476,11 +675,18 @@ export async function activate(
                                     `Failed to remove ${wt.branch}`,
                                     err
                                 );
+                                failed.push(wt.branch);
                             }
                         }
-                        void showAutoInfo(
-                            `Cleaned up ${removed} worktree(s).`
-                        );
+                        if (failed.length > 0) {
+                            void showAutoWarning(
+                                `Cleaned up ${removed} worktree(s), but ${failed.length} failed: ${failed.join(", ")}.\n\nCheck the Grove output channel for details.`
+                            );
+                        } else {
+                            void showAutoInfo(
+                                `Cleaned up ${removed} worktree(s).`
+                            );
+                        }
                     }
                 );
 
@@ -562,6 +768,9 @@ export async function activate(
                 task
             );
         }
+        // launchClaude returns undefined when user cancels the session
+        // prompt or when Claude is not installed (which already shows
+        // its own error dialog). No additional message needed here.
     }
 
     // Launch Claude Code in Worktree (from worktree context menu)
@@ -604,9 +813,8 @@ export async function activate(
                         item.worktree.path
                     );
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
                     void showAutoError(
-                        `Failed to launch session: ${msg}`
+                        formatErrorForUser(err, "Failed to launch Claude session")
                     );
                 }
             }
@@ -637,9 +845,8 @@ export async function activate(
                 try {
                     sessionTracker.stopSession(item.session.id);
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
                     void showAutoError(
-                        `Failed to stop session: ${msg}`
+                        formatErrorForUser(err, "Failed to stop session")
                     );
                 }
             }
@@ -672,9 +879,8 @@ export async function activate(
                         `Stopped ${count} session(s).`
                     );
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
                     void showAutoError(
-                        `Failed to stop sessions: ${msg}`
+                        formatErrorForUser(err, "Failed to stop sessions")
                     );
                 }
             }
@@ -718,9 +924,8 @@ export async function activate(
                 try {
                     sessionTracker.setTaskDescription(item.session.id, desc);
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
                     void showAutoError(
-                        `Failed to update task description: ${msg}`
+                        formatErrorForUser(err, "Failed to update task description")
                     );
                 }
             }
@@ -749,9 +954,8 @@ export async function activate(
                         item.worktree.path
                     );
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
                     void showAutoError(
-                        `Failed to open terminal: ${msg}`
+                        formatErrorForUser(err, "Failed to open terminal")
                     );
                 }
             }
@@ -767,9 +971,8 @@ export async function activate(
                 try {
                     await openInNewWindow(item.worktree.path);
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
                     void showAutoError(
-                        `Failed to open new window: ${msg}`
+                        formatErrorForUser(err, "Failed to open new window")
                     );
                 }
             }
@@ -796,9 +999,8 @@ export async function activate(
                     );
                     terminal.sendText(`git diff ${sanitizeRefName(baseBranch)}...HEAD --stat`);
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
                     void showAutoError(
-                        `Failed to view diff: ${msg}`
+                        formatErrorForUser(err, "Failed to view diff")
                     );
                 }
             }
@@ -831,19 +1033,19 @@ export async function activate(
                         `Synced '${wt.branch}' with remote.`
                     );
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
-                    if (msg.includes("no tracking information")) {
+                    const raw = err instanceof Error ? err.message : String(err);
+                    if (raw.includes("no tracking information")) {
                         void showAutoWarning(
-                            `Branch '${wt.branch}' has no remote tracking branch. Push it first with: git push -u origin ${wt.branch}`
+                            `Branch '${wt.branch}' has no remote tracking branch.\n\nFix: Push it first with: git push -u origin ${wt.branch}`
                         );
-                    } else if (msg.includes("conflict")) {
+                    } else if (raw.includes("conflict")) {
                         void showAutoWarning(
-                            `Rebase conflict while syncing '${wt.branch}'. Resolve in terminal.`
+                            `Rebase conflict while syncing '${wt.branch}'.\n\nFix: Resolve the conflict in the terminal that just opened, then run 'git rebase --continue'.`
                         );
                         openTerminal(`Sync: ${wt.branch}`, wt.path);
                     } else {
                         void showAutoError(
-                            `Failed to sync '${wt.branch}': ${msg}`
+                            formatErrorForUser(err, `Failed to sync '${wt.branch}'`)
                         );
                     }
                 }
@@ -857,6 +1059,66 @@ export async function activate(
             "grove.refreshSidebar",
             () => {
                 refreshAll();
+            }
+        )
+    );
+
+    // Add worktree to workspace (shows in Explorer)
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            "grove.addToWorkspace",
+            (item?: WorktreeItem) => {
+                if (!item?.worktree) return;
+                const wtPath = item.worktree.path;
+                const wtUri = vscode.Uri.file(wtPath);
+
+                // Check if already added
+                const existing = vscode.workspace.workspaceFolders ?? [];
+                const alreadyAdded = existing.some(
+                    (f) => f.uri.fsPath === wtPath
+                );
+                if (alreadyAdded) {
+                    void showAutoInfo(
+                        `'${item.worktree.branch}' is already visible in the Explorer.`
+                    );
+                    return;
+                }
+
+                vscode.workspace.updateWorkspaceFolders(
+                    existing.length,
+                    0,
+                    { uri: wtUri, name: `WT: ${item.worktree.branch}` }
+                );
+                void showAutoInfo(
+                    `Added '${item.worktree.branch}' to the Explorer. You can now browse and edit files.`
+                );
+            }
+        )
+    );
+
+    // Remove worktree from workspace (hides from Explorer)
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            "grove.removeFromWorkspace",
+            (item?: WorktreeItem) => {
+                if (!item?.worktree) return;
+                const wtPath = item.worktree.path;
+
+                const folders = vscode.workspace.workspaceFolders ?? [];
+                const idx = folders.findIndex(
+                    (f) => f.uri.fsPath === wtPath
+                );
+                if (idx === -1) {
+                    void showAutoInfo(
+                        `'${item.worktree.branch}' is not in the Explorer.`
+                    );
+                    return;
+                }
+
+                vscode.workspace.updateWorkspaceFolders(idx, 1);
+                void showAutoInfo(
+                    `Removed '${item.worktree.branch}' from the Explorer.`
+                );
             }
         )
     );
@@ -905,9 +1167,8 @@ export async function activate(
                     await vscode.commands.executeCommand(picked.commandId);
                 }
             } catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
                 void showAutoError(
-                    `Quick menu error: ${msg}`
+                    formatErrorForUser(err, "Quick menu error")
                 );
             }
         })
@@ -957,7 +1218,7 @@ export async function activate(
                 );
                 if (!template) {
                     void showAutoError(
-                        `Failed to load template: ${templatePick.label}`
+                        `Failed to load template '${templatePick.label}'.\n\nThe template file may be corrupted or contain invalid JSON. Check the .grove/templates/ directory and the Grove output channel for details.`
                     );
                     return;
                 }
@@ -1064,7 +1325,7 @@ export async function activate(
                 } catch (err) {
                     logError("Team launch failed", err);
                     void showAutoError(
-                        `Team launch failed: ${err instanceof Error ? err.message : String(err)}`
+                        formatErrorForUser(err, "Team launch failed")
                     );
                 }
             }
@@ -1090,9 +1351,8 @@ export async function activate(
                     orchestrator.stopTeam(teamId);
                     refreshAll();
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
                     void showAutoError(
-                        `Failed to stop team: ${msg}`
+                        formatErrorForUser(err, "Failed to stop team")
                     );
                 }
             }
@@ -1110,9 +1370,8 @@ export async function activate(
                     orchestrator.stopAgent(item.teamId, item.agentState.role);
                     refreshAll();
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
                     void showAutoError(
-                        `Failed to stop agent: ${msg}`
+                        formatErrorForUser(err, "Failed to stop agent")
                     );
                 }
             }
@@ -1167,7 +1426,7 @@ export async function activate(
                         } catch (err) {
                             logError("Team cleanup failed", err);
                             void showAutoError(
-                                `Cleanup failed: ${err instanceof Error ? err.message : String(err)}`
+                                formatErrorForUser(err, "Team cleanup failed")
                             );
                         }
                         refreshAll();
@@ -1233,7 +1492,7 @@ export async function activate(
                 } catch (err) {
                     logError("Overlap check failed", err);
                     void showAutoError(
-                        `Overlap check failed: ${err instanceof Error ? err.message : String(err)}`
+                        formatErrorForUser(err, "Overlap check failed")
                     );
                 }
             }
@@ -1286,7 +1545,6 @@ export async function activate(
                     },
                     async () =>
                         generateMergeReport(
-                            repoRoot,
                             picks.map((p) => p.worktree.path),
                             baseBranch
                         )
@@ -1312,7 +1570,7 @@ export async function activate(
                 } catch (err) {
                     logError("Merge report generation failed", err);
                     void showAutoError(
-                        `Merge report failed: ${err instanceof Error ? err.message : String(err)}`
+                        formatErrorForUser(err, "Merge report failed")
                     );
                 }
             }
@@ -1688,7 +1946,7 @@ export async function activate(
                 } catch (err) {
                     logError("Merge sequence failed", err);
                     void showAutoError(
-                        `Merge sequence failed: ${err instanceof Error ? err.message : String(err)}`
+                        formatErrorForUser(err, "Merge sequence failed")
                     );
                 }
             }

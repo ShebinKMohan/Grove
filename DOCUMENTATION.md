@@ -1,6 +1,6 @@
 # Grove — Worktree Control for Claude Code
 
-> **Version:** 0.2.4
+> **Version:** 0.3.0
 > **Type:** VS Code / Cursor Extension
 > **License:** MIT
 
@@ -449,17 +449,32 @@ Step 4 ─ Cleanup
 **What:** Full lifecycle management of git worktrees through the sidebar.
 
 **Create Worktree:**
-- Single input box: enter a name (e.g., "add-auth")
-- Auto-generates branch name: `worktree-add-auth`
-- Creates at: `.claude/worktrees/add-auth/`
-- Auto-detects package manager (npm/yarn/pnpm/pip/poetry) and installs dependencies
-- Auto-adds worktree path to `.gitignore`
-- Validates branch names against git rules
+1. **Pick base branch** — QuickPick showing all local branches, sorted by most recent commit. Default base branch (e.g., `main`) listed first, current branch second
+2. **Name the new branch** — input box validates against git naming rules. Shows which branch you're branching from
+3. Creates at: `.claude/worktrees/<branch-slug>/`
+4. Auto-detects package manager (npm/yarn/pnpm/pip/pipenv/poetry) and installs dependencies
+5. Auto-adds worktree path to `.gitignore`
+
+**File Browsing:**
+- Expand any worktree in the sidebar to see all changed files (committed + uncommitted vs base branch)
+- Each file shows its name, directory path, and change status with color-coded icons:
+  - Green `+` for added files
+  - Yellow `~` for modified files
+  - Red `-` for deleted files
+  - Blue `→` for renamed files
+- **Click a modified file** to open VS Code's side-by-side diff editor (base branch vs worktree)
+- **Click an added file** to open it directly
+
+**Show in Explorer:**
+- Right-click a worktree → "Show in Explorer" to add it as a workspace folder
+- Gives you full file management in VS Code's Explorer: create, rename, delete, drag-drop
+- "Hide from Explorer" to remove when done
 
 **Delete Worktree:**
-- Safety check: warns if there are uncommitted changes or unpushed commits
-- Runs `git worktree remove` and optionally `git branch -d`
+- Safety check: warns if there are uncommitted changes or active sessions
+- Options: "Delete Worktree Only" or "Delete + Local Branch" (clearly labeled — remote branch is never touched)
 - Protected branches (main, master, develop, production) cannot be deleted
+- Automatically removes the worktree's `.gitignore` entry on deletion
 
 **Health Checks:**
 - Detects missing worktree directories
@@ -470,6 +485,7 @@ Step 4 ─ Cleanup
 **Cleanup Wizard:**
 - Finds stale worktrees: clean (no changes), no active sessions, idle
 - Batch delete with confirmation dialog
+- Reports which specific worktrees failed to remove (not silent)
 - Skips protected branches
 
 **Sync from Remote:**
@@ -947,6 +963,21 @@ Grove is designed to work alongside Claude Code, not replace it. Here's how the 
 
 ## Troubleshooting
 
+### "command 'grove.createWorktree' not found"
+This means the extension failed to activate. Common causes:
+- **No folder open** — open a project folder (File → Open Folder)
+- **Not a git repository** — run `git init` or open a folder with a `.git` directory
+- **Git not installed** — install git and reload the window (⇧⌘P → Reload Window)
+
+Since v0.3.0, all commands show a helpful error message instead of this cryptic VS Code error.
+
+### "Claude Code CLI not found"
+Grove checks for `claude` in your PATH before launching sessions. If not found, it shows a dialog with:
+- **Install Instructions** — opens the Claude Code docs
+- **Retry** — re-checks after you install
+
+If `claude` is installed via a custom PATH setup (e.g., nvm, conda), make sure it's available in the shell VS Code uses.
+
 ### "No team templates found"
 The extension looks for templates in three locations (in order):
 1. Project: `.grove/templates/` in your repo
@@ -961,17 +992,26 @@ File watchers fire on every git operation. The extension debounces to 2000ms, bu
 ### "Worktree directory missing" (red error icon)
 The worktree's directory was deleted outside of the extension (e.g., manual `rm -rf`). Right-click → Delete Worktree to clean up the git reference.
 
+### "Git is locked by another process"
+Another git operation is running. Wait a moment and retry. If stuck, delete the lock file:
+```bash
+rm -f .git/index.lock
+```
+
+### "Permission denied"
+Check file permissions for the repository directory. On macOS/Linux: `ls -la .git/` to verify.
+
 ### Merge conflicts during merge execution
 The sequencer pauses and shows which files conflict. Resolve conflicts in the main directory, then re-run the merge step. Use `git merge --abort` if you need to start over.
 
-### Claude Code session exits immediately
-Check that the `claude` CLI is installed and available in your PATH. Run `which claude` in a terminal to verify. The extension launches Claude through a clean zsh shell — if claude is installed via a custom PATH setup, it may not be found.
-
 ### Agent Teams env var not set
-The extension auto-writes `"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"` inside the `"env"` key of `~/.claude/settings.json`. If teams still don't work, verify the file contains `{ "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" } }`. The value must be `"1"` (not `"true"`) and must be nested inside `"env"`, not at the root level.
+The extension auto-writes `"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"` inside the `"env"` key of `~/.claude/settings.json`. If this fails (e.g., file locked), you'll see a warning. Manually verify the file contains `{ "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" } }`. The value must be `"1"` (not `"true"`) and must be nested inside `"env"`, not at the root level.
 
 ### Worktree creation fails with "branch already exists"
 The extension auto-detects existing branches. If the branch exists locally, it uses it. If it exists only on remote, it tracks it. The error usually means git is in an unexpected state — try `git worktree prune` to clean up stale references.
+
+### "The base branch or starting point does not exist"
+The branch you selected as the base doesn't exist locally. Run `git fetch --all` to update remote refs, then retry.
 
 ### Dashboard shows 0 files changed
 Files are only counted after agents commit their work. If agents are still running (code is uncommitted), the merge report auto-commits before analysis. Make sure sessions are completed before generating the report.
@@ -987,7 +1027,7 @@ All commands are available via `Cmd+Shift+P` (macOS) or `Ctrl+Shift+P` (Windows/
 
 | Command | When to Use |
 |---------|-------------|
-| `Grove: Create Worktree` | Create a new isolated worktree |
+| `Grove: Create Worktree` | Create a new isolated worktree from a selected base branch |
 | `Grove: Launch Agent Team` | Deploy a coordinated team of agents |
 | `Grove: Open Dashboard` | Open the real-time monitoring panel |
 | `Grove: Check File Overlaps` | Manually trigger overlap scan |
@@ -1004,6 +1044,8 @@ All commands are available via `Cmd+Shift+P` (macOS) or `Ctrl+Shift+P` (Windows/
 | `Grove: Sync from Remote` | `$(cloud-download)` | Worktree inline icon, right-click menu |
 | `Grove: Launch Claude Code in Worktree` | `$(rocket)` | Worktree inline icon |
 | `Grove: Open in Terminal` | `$(terminal)` | Worktree inline icon |
+| `Grove: Show in Explorer` | `$(folder-opened)` | Worktree right-click menu |
+| `Grove: Hide from Explorer` | — | Worktree right-click menu |
 | `Grove: Delete Worktree` | — | Worktree right-click menu |
 | `Grove: View Diff` | — | Worktree right-click menu |
 | `Grove: Open in New Window` | — | Worktree right-click menu |

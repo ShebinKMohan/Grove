@@ -12,6 +12,8 @@ import { log } from "./logger";
 
 /** Cached absolute path to the claude binary. */
 let cachedClaudePath: string | undefined;
+/** Whether claude was actually found on PATH (vs falling back to bare name). */
+let claudeVerified = false;
 
 function resolveClaudePath(): string {
     if (!cachedClaudePath) {
@@ -21,11 +23,22 @@ function resolveClaudePath(): string {
                 encoding: "utf-8",
                 timeout: 5000,
             }).trim().split("\n")[0]; // `where` on Windows can return multiple lines
+            claudeVerified = true;
         } catch {
             cachedClaudePath = "claude";
+            claudeVerified = false;
         }
     }
     return cachedClaudePath;
+}
+
+/**
+ * Reset the cached path so the next call re-checks.
+ * Called when the user clicks "Retry" after installing Claude.
+ */
+function resetClaudePathCache(): void {
+    cachedClaudePath = undefined;
+    claudeVerified = false;
 }
 
 /**
@@ -53,7 +66,7 @@ export async function openInNewWindow(folderPath: string): Promise<void> {
  * Claude stores sessions in ~/.claude/projects/<slug>/ where slug is
  * the absolute path with /, _, and . replaced by -.
  */
-export function hasExistingClaudeSession(cwd: string): boolean {
+function hasExistingClaudeSession(cwd: string): boolean {
     try {
         const claudeDir = path.join(os.homedir(), ".claude", "projects");
         if (!fs.existsSync(claudeDir)) return false;
@@ -86,6 +99,24 @@ export async function launchClaude(
     let claudeArgs: string[] = [];
 
     log(`Launch Claude: branch="${branchName}" cwd="${cwd}"`);
+
+    // ── Pre-flight: check Claude is installed ────────────
+    if (!claudeVerified) {
+        const action = await vscode.window.showErrorMessage(
+            "Claude Code CLI not found.\n\nGrove needs 'claude' on your PATH to launch sessions.",
+            "Install Instructions",
+            "Retry"
+        );
+        if (action === "Install Instructions") {
+            void vscode.env.openExternal(
+                vscode.Uri.parse("https://docs.anthropic.com/en/docs/claude-code/getting-started")
+            );
+        } else if (action === "Retry") {
+            resetClaudePathCache();
+            return launchClaude(branchName, cwd, options);
+        }
+        return undefined;
+    }
 
     if (!options?.skipSessionPrompt && hasExistingClaudeSession(cwd)) {
         const choice = await vscode.window.showQuickPick(

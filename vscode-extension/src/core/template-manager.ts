@@ -12,6 +12,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { log } from "../utils/logger";
 
 // ────────────────────────────────────────────
 // Types
@@ -45,7 +46,7 @@ export interface TeamTemplate {
     estimatedTokens: string;
 }
 
-export interface TemplateValidationError {
+interface TemplateValidationError {
     field: string;
     message: string;
 }
@@ -335,9 +336,12 @@ function readTemplatesFromDir(dir: string): TeamTemplate[] {
             const errors = validateTemplate(parsed);
             if (errors.length === 0) {
                 templates.push(parsed as TeamTemplate);
+            } else {
+                log(`Skipping invalid template ${file}: ${errors.join(", ")}`);
             }
-        } catch {
-            // Skip invalid files
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log(`Failed to load template file ${file}: ${msg}`);
         }
     }
 

@@ -67,7 +67,10 @@ export async function git(args: string[], cwd: string): Promise<string> {
         return stdout.trim();
     } catch (err) {
         const error = err as { stderr?: string; message?: string };
-        const message = error.stderr?.trim() || error.message || String(err);
+        let message = error.stderr?.trim() || error.message || String(err);
+        // Strip "fatal: " and "error: " prefixes that git adds — they're
+        // unhelpful noise when the message is embedded in our own UI.
+        message = message.replace(/^(fatal|error): /i, "");
         throw new GitError(message, args);
     }
 }
@@ -141,6 +144,22 @@ export async function branchExistsOnRemote(
         return true;
     } catch {
         return false;
+    }
+}
+
+/**
+ * List all local branch names, sorted by most recent commit first.
+ */
+export async function listLocalBranches(cwd: string): Promise<string[]> {
+    try {
+        const raw = await git(
+            ["branch", "--sort=-committerdate", "--format=%(refname:short)"],
+            cwd
+        );
+        if (!raw) return [];
+        return raw.split("\n").filter(Boolean);
+    } catch {
+        return [];
     }
 }
 

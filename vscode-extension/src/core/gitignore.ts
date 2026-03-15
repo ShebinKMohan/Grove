@@ -47,3 +47,33 @@ export function ensureGitignored(
 
     return true;
 }
+
+/**
+ * Remove a worktree path from .gitignore.
+ * Returns true if an entry was removed, false if not found.
+ */
+export function removeFromGitignore(
+    repoRoot: string,
+    worktreePath: string
+): boolean {
+    const gitignorePath = path.join(repoRoot, ".gitignore");
+    if (!fs.existsSync(gitignorePath)) return false;
+
+    const resolved = path.resolve(worktreePath);
+    const resolvedRoot = path.resolve(repoRoot);
+
+    if (!resolved.startsWith(resolvedRoot + path.sep) && resolved !== resolvedRoot) {
+        return false;
+    }
+
+    const relative = path.relative(resolvedRoot, resolved).replace(/\\/g, "/");
+    const pattern = `/${relative}/`;
+
+    const content = fs.readFileSync(gitignorePath, "utf-8");
+    if (!content.includes(pattern)) return false;
+
+    const lines = content.split("\n");
+    const filtered = lines.filter((line) => line.trim() !== pattern);
+    fs.writeFileSync(gitignorePath, filtered.join("\n"));
+    return true;
+}

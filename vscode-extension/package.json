@@ -2,7 +2,7 @@
   "name": "grove-pilot",
   "displayName": "Grove — Worktree Control for Claude Code",
   "description": "Control plane for parallel AI development — git worktree management, Claude Code session orchestration, and merge intelligence",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "publisher": "ShebinMohanK",
   "author": {
     "name": "Shebin K Mohan",
@@ -192,6 +192,24 @@
         "title": "Quick Menu",
         "category": "Grove",
         "icon": "$(layers)"
+      },
+      {
+        "command": "grove.addToWorkspace",
+        "title": "Show in Explorer",
+        "category": "Grove",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "grove.removeFromWorkspace",
+        "title": "Hide from Explorer",
+        "category": "Grove",
+        "icon": "$(folder)"
+      },
+      {
+        "command": "grove.openFileDiff",
+        "title": "Show Diff",
+        "category": "Grove",
+        "icon": "$(diff)"
       }
     ],
     "viewsContainers": {
@@ -288,6 +306,11 @@
           "command": "grove.viewDiff",
           "when": "viewItem == worktree || viewItem == worktree-main || viewItem == worktree-with-session",
           "group": "2_inspect"
+        },
+        {
+          "command": "grove.addToWorkspace",
+          "when": "viewItem == worktree || viewItem == worktree-with-session",
+          "group": "1_open"
         },
         {
           "command": "grove.deleteWorktree",
@@ -404,6 +427,18 @@
         },
         {
           "command": "grove.cleanupTeam",
+          "when": "false"
+        },
+        {
+          "command": "grove.addToWorkspace",
+          "when": "false"
+        },
+        {
+          "command": "grove.removeFromWorkspace",
+          "when": "false"
+        },
+        {
+          "command": "grove.openFileDiff",
           "when": "false"
         }
       ]

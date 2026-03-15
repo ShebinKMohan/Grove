@@ -29,13 +29,14 @@ import { loadProjectConfig } from "./config-manager";
 import { SessionTracker } from "./session-tracker";
 import { launchClaude } from "../utils/terminal";
 import { log, logError } from "../utils/logger";
+import { formatErrorForUser } from "../utils/errors";
 import { showAutoInfo } from "../ui/notifications";
 
 // ────────────────────────────────────────────
 // Types
 // ────────────────────────────────────────────
 
-export type TeamStatus = "launching" | "running" | "completed" | "error" | "stopped" | "cancelled";
+type TeamStatus = "launching" | "running" | "completed" | "error" | "stopped" | "cancelled";
 
 export interface AgentState {
     role: string;
@@ -78,7 +79,7 @@ interface PersistedTeam {
     agents: PersistedAgent[];
 }
 
-export interface PreFlightResult {
+interface PreFlightResult {
     ok: boolean;
     overlaps: OwnershipOverlap[];
     agentTeamsEnabled: boolean;
@@ -339,8 +340,7 @@ export class AgentOrchestrator implements vscode.Disposable {
 
                             // Ask user if they want to continue or abort
                             const action = await vscode.window.showWarningMessage(
-                                `Failed to create worktree for ${agent.displayName}: ` +
-                                `${err instanceof Error ? err.message : String(err)}`,
+                                formatErrorForUser(err, `Failed to create worktree for ${agent.displayName}`),
                                 "Continue Without This Agent",
                                 "Abort Team Launch"
                             );
@@ -699,6 +699,10 @@ export class AgentOrchestrator implements vscode.Disposable {
             }
         } catch (err) {
             logError("Failed to set agent teams env var", err);
+            void vscode.window.showWarningMessage(
+                "Grove: Could not enable Agent Teams in Claude settings (~/.claude/settings.json). " +
+                "Teams may not work correctly. Check file permissions."
+            );
         }
     }
 

@@ -18,7 +18,9 @@ import * as vscode from "vscode";
 import * as path from "path";
 import {
     listAllWorktrees,
+    getChangedFilesWithStatus,
     WorktreeInfo,
+    ChangedFile,
 } from "../../core/worktree-manager";
 import {
     SessionTracker,
@@ -42,19 +44,20 @@ export type UnifiedTreeElement =
     | AgentItem
     | WorktreeItem
     | SessionItem
+    | ChangedFileItem
 ;
 
 // ────────────────────────────────────────────
 // WorkflowHintItem
 // ────────────────────────────────────────────
 
-export type WorkflowHintKind =
+type WorkflowHintKind =
     | "no-worktrees"
     | "no-sessions"
     | "sessions-running"
     | "all-done";
 
-export class WorkflowHintItem extends vscode.TreeItem {
+class WorkflowHintItem extends vscode.TreeItem {
     public readonly kind: WorkflowHintKind;
 
     constructor(kind: WorkflowHintKind, sessionCount: number) {
@@ -125,7 +128,7 @@ export class WorkflowHintItem extends vscode.TreeItem {
 // DividerItem — thin visual separator
 // ────────────────────────────────────────────
 
-export class DividerItem extends vscode.TreeItem {
+class DividerItem extends vscode.TreeItem {
     constructor() {
         super("──────────", vscode.TreeItemCollapsibleState.None);
         this.contextValue = "divider";
@@ -350,11 +353,13 @@ export class WorktreeItem extends vscode.TreeItem {
     public readonly hasActiveSession: boolean;
 
     constructor(worktree: WorktreeInfo, hasActiveSession: boolean) {
+        // Always collapsible so users can expand to see changed files.
+        // Auto-expand if there's an active session, else collapsed.
         super(
             worktree.branch,
             hasActiveSession
                 ? vscode.TreeItemCollapsibleState.Expanded
-                : vscode.TreeItemCollapsibleState.None
+                : vscode.TreeItemCollapsibleState.Collapsed
         );
         this.worktree = worktree;
         this.hasActiveSession = hasActiveSession;
@@ -657,6 +662,76 @@ export class SessionItem extends vscode.TreeItem {
 }
 
 // ────────────────────────────────────────────
+// ChangedFileItem
+// ────────────────────────────────────────────
+
+class ChangedFileItem extends vscode.TreeItem {
+    public readonly changedFile: ChangedFile;
+    public readonly worktreePath: string;
+
+    constructor(file: ChangedFile, worktreePath: string, baseBranch: string) {
+        const fileName = path.basename(file.filePath);
+        super(fileName, vscode.TreeItemCollapsibleState.None);
+        this.changedFile = file;
+        this.worktreePath = worktreePath;
+
+        const dir = path.dirname(file.filePath);
+        this.description = dir === "." ? "" : dir;
+        this.contextValue = "changed-file";
+        this.iconPath = ChangedFileItem.getIcon(file.status);
+        this.tooltip = `${file.filePath} (${file.status})`;
+
+        const fileUri = vscode.Uri.file(
+            path.join(worktreePath, file.filePath)
+        );
+        this.resourceUri = fileUri;
+
+        if (file.status === "modified" || file.status === "renamed") {
+            // Open inline diff: base branch version vs current worktree version
+            this.command = {
+                title: "Show Diff",
+                command: "grove.openFileDiff",
+                arguments: [worktreePath, file.filePath, baseBranch],
+            };
+        } else {
+            // Added or deleted — just open the file
+            this.command = {
+                title: "Open File",
+                command: "vscode.open",
+                arguments: [fileUri],
+            };
+        }
+    }
+
+    private static getIcon(
+        status: ChangedFile["status"]
+    ): vscode.ThemeIcon {
+        switch (status) {
+            case "added":
+                return new vscode.ThemeIcon(
+                    "diff-added",
+                    new vscode.ThemeColor("gitDecoration.addedResourceForeground")
+                );
+            case "modified":
+                return new vscode.ThemeIcon(
+                    "diff-modified",
+                    new vscode.ThemeColor("gitDecoration.modifiedResourceForeground")
+                );
+            case "deleted":
+                return new vscode.ThemeIcon(
+                    "diff-removed",
+                    new vscode.ThemeColor("gitDecoration.deletedResourceForeground")
+                );
+            case "renamed":
+                return new vscode.ThemeIcon(
+                    "diff-renamed",
+                    new vscode.ThemeColor("gitDecoration.renamedResourceForeground")
+                );
+        }
+    }
+}
+
+// ────────────────────────────────────────────
 // Unified Tree Data Provider
 // ────────────────────────────────────────────
 
@@ -770,9 +845,9 @@ export class UnifiedTreeProvider
 
     // ── Child Children ──────────────────────────────────────
 
-    private getChildrenOf(
+    private async getChildrenOf(
         element: UnifiedTreeElement
-    ): UnifiedTreeElement[] {
+    ): Promise<UnifiedTreeElement[]> {
         if (element instanceof TeamItem) {
             return this.getTeamChildren(element);
         }
@@ -781,7 +856,7 @@ export class UnifiedTreeProvider
             return this.getWorktreeChildren(element);
         }
 
-        // Leaf nodes: WorkflowHintItem, DividerItem, AgentItem, SessionItem
+        // Leaf nodes: WorkflowHintItem, DividerItem, AgentItem, SessionItem, ChangedFileItem
         return [];
     }
 
@@ -792,15 +867,47 @@ export class UnifiedTreeProvider
         );
     }
 
-    private getWorktreeChildren(worktreeItem: WorktreeItem): SessionItem[] {
-        if (!this.tracker) return [];
+    private async getWorktreeChildren(
+        worktreeItem: WorktreeItem
+    ): Promise<UnifiedTreeElement[]> {
+        const children: UnifiedTreeElement[] = [];
 
-        // Return active sessions for this worktree
-        const sessions = this.cachedActiveSessions.filter(
-            (s) => s.worktreePath === worktreeItem.worktree.path
-        );
+        // 1. Active sessions for this worktree
+        if (this.tracker) {
+            const sessions = this.cachedActiveSessions.filter(
+                (s) => s.worktreePath === worktreeItem.worktree.path
+            );
+            for (const s of sessions) {
+                children.push(new SessionItem(s, this.tracker));
+            }
+        }
 
-        return sessions.map((s) => new SessionItem(s, this.tracker!));
+        // 2. Changed files (committed + uncommitted vs base branch)
+        if (
+            !worktreeItem.worktree.isMain &&
+            worktreeItem.worktree.statusSummary !== "missing"
+        ) {
+            try {
+                const config = vscode.workspace.getConfiguration("grove");
+                const baseBranch = config.get<string>(
+                    "defaultBaseBranch",
+                    "main"
+                );
+                const changedFiles = await getChangedFilesWithStatus(
+                    worktreeItem.worktree.path,
+                    baseBranch
+                );
+                for (const file of changedFiles) {
+                    children.push(
+                        new ChangedFileItem(file, worktreeItem.worktree.path, baseBranch)
+                    );
+                }
+            } catch {
+                // Non-critical — just show no files
+            }
+        }
+
+        return children;
     }
 
     // ── Workflow Hint Logic ─────────────────────────────────
@@ -883,7 +990,7 @@ export class UnifiedTreeProvider
 // Completed Tree Provider — bottom panel
 // ────────────────────────────────────────────
 
-export type CompletedTreeElement = SessionItem | TeamItem | AgentItem;
+type CompletedTreeElement = SessionItem | TeamItem | AgentItem;
 
 export class CompletedTreeProvider
     implements vscode.TreeDataProvider<CompletedTreeElement>, vscode.Disposable

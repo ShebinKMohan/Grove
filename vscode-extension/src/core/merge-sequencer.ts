@@ -20,6 +20,35 @@ import {
     removeWorktree,
 } from "./worktree-manager";
 import { logError } from "../utils/logger";
+import { GroveError } from "../utils/errors";
+
+/**
+ * Turn a raw git error message into something a user can understand.
+ */
+function humanizeMergeError(raw: string, branch: string): string {
+    if (raw.includes("unrelated histories")) {
+        return `Branch '${branch}' has unrelated history. It may have been created from a different repository or orphan branch.`;
+    }
+    if (raw.includes("not something we can merge")) {
+        return `Branch '${branch}' could not be found. Make sure the branch name is correct and exists locally.`;
+    }
+    if (raw.includes("index.lock") || raw.includes("Unable to create") && raw.includes(".lock")) {
+        return `Git is locked by another process. Wait a moment and try again, or delete the lock file: rm -f .git/index.lock`;
+    }
+    if (raw.includes("CONFLICT") || raw.includes("conflict")) {
+        return `Merge conflict while merging '${branch}'.`;
+    }
+    if (raw.includes("not possible because you have unmerged files")) {
+        return `There are unresolved conflicts from a previous merge. Resolve them first or run 'git merge --abort'.`;
+    }
+    if (raw.includes("overwritten by merge")) {
+        return `Local changes would be overwritten by merge. Commit or stash your changes first.`;
+    }
+    if (raw.includes("permission denied") || raw.includes("EACCES")) {
+        return `Permission denied. Check file permissions in the repository.`;
+    }
+    return `Failed to merge '${branch}': ${raw}`;
+}
 
 // ────────────────────────────────────────────
 // Types
@@ -48,7 +77,7 @@ export interface WorktreeMergeInfo {
     hasUncommittedChanges: boolean;
 }
 
-export interface FileOverlapInfo {
+interface FileOverlapInfo {
     /** Relative file path */
     filePath: string;
     /** Branches that modified this file */
@@ -76,13 +105,13 @@ export interface MergeReport {
     totalLinesRemoved: number;
 }
 
-export interface MergeOrderEntry {
+interface MergeOrderEntry {
     branch: string;
     worktreePath: string;
     reason: string;
 }
 
-export type MergeStepStatus =
+type MergeStepStatus =
     | "pending"
     | "merging"
     | "testing"
@@ -92,18 +121,12 @@ export type MergeStepStatus =
     | "skipped"
     | "error";
 
-export interface MergeStep {
+interface MergeStep {
     branch: string;
     worktreePath: string;
     status: MergeStepStatus;
     message?: string;
     conflictFiles?: string[];
-}
-
-export interface MergeResult {
-    steps: MergeStep[];
-    completedAt?: string;
-    allSucceeded: boolean;
 }
 
 // ────────────────────────────────────────────
@@ -114,7 +137,6 @@ export interface MergeResult {
  * Generate a merge readiness report for a set of worktrees.
  */
 export async function generateMergeReport(
-    _repoRoot: string,
     worktreePaths: string[],
     baseBranch: string = "main"
 ): Promise<MergeReport> {
@@ -229,12 +251,14 @@ export async function executeMergeStep(
                 step.message = `Merge conflict in ${conflictFiles.length} file(s)`;
             } else {
                 step.status = "error";
-                step.message = err instanceof Error ? err.message : String(err);
+                const raw = err instanceof Error ? err.message : String(err);
+                step.message = humanizeMergeError(raw, branch);
             }
         }
     } catch (err) {
         step.status = "error";
-        step.message = err instanceof Error ? err.message : String(err);
+        const raw = err instanceof Error ? err.message : String(err);
+        step.message = humanizeMergeError(raw, branch);
     }
 
     return step;
@@ -285,7 +309,10 @@ export async function abortMerge(repoRoot: string): Promise<void> {
     // Resolve against repoRoot since git-dir may be relative
     const gitDir = path.resolve(repoRoot, (await git(["rev-parse", "--git-dir"], repoRoot)).trim());
     if (fs.existsSync(path.join(gitDir, "MERGE_HEAD"))) {
-        throw new Error("Merge abort failed: merge state still present. Manual intervention required.");
+        throw new GroveError(
+            "Could not abort the merge — merge state is still present.",
+            "Open a terminal and run 'git merge --abort' manually. If that doesn't work, try 'git reset --hard HEAD'."
+        );
     }
 }
 
@@ -422,9 +449,19 @@ export async function postMergeCleanup(
             });
             removed++;
         } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            errors.push(`${wt.branch}: ${msg}`);
             logError(`Post-merge cleanup failed for ${wt.branch}`, err);
+            if (err instanceof GroveError) {
+                errors.push(`${wt.branch}: ${err.message}`);
+            } else {
+                const raw = err instanceof Error ? err.message : String(err);
+                if (raw.includes("EACCES") || raw.includes("permission denied")) {
+                    errors.push(`${wt.branch}: Permission denied. Close any editors or terminals using this worktree and try again.`);
+                } else if (raw.includes("index.lock") || raw.includes(".lock")) {
+                    errors.push(`${wt.branch}: Git is locked by another process. Wait a moment and try again.`);
+                } else {
+                    errors.push(`${wt.branch}: Could not remove worktree. Check the Grove output channel for details.`);
+                }
+            }
         }
     }
 

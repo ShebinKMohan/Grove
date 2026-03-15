@@ -12,12 +12,13 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import { git } from "../utils/git";
+import { log } from "../utils/logger";
 
 // ────────────────────────────────────────────
 // Types
 // ────────────────────────────────────────────
 
-export type OverlapSeverity = "conflict" | "warning" | "info";
+type OverlapSeverity = "conflict" | "warning" | "info";
 
 export interface FileOverlap {
     /** Relative file path (relative to repo root) */
@@ -94,7 +95,7 @@ export class OverlapDetector implements vscode.Disposable {
     readonly onDidChangeOverlaps = this._onDidChangeOverlaps.event;
 
     constructor(
-        private readonly _repoRoot: string,
+        _repoRoot: string,
         private readonly debounceMs: number = 500
     ) {}
 
@@ -198,8 +199,10 @@ export class OverlapDetector implements vscode.Disposable {
                     existing.add(wt.path);
                     this.modifiedFiles.set(file, existing);
                 }
-            } catch {
-                // Ignore — base branch might not exist or worktree is fresh
+            } catch (err) {
+                // Non-critical but worth logging — overlap detection may be incomplete
+                const msg = err instanceof Error ? err.message : String(err);
+                log(`Overlap scan skipped for ${wt.path}: ${msg}`);
             }
         }
 

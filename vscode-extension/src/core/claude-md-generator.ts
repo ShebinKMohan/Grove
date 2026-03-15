@@ -46,7 +46,6 @@ export function generateClaudeMd(options: ClaudeMdOptions): void {
 
 /**
  * Build the CLAUDE.md content string (without writing to disk).
- * Exported for testing and preview.
  */
 export function buildClaudeMdContent(options: ClaudeMdOptions): string {
     const {

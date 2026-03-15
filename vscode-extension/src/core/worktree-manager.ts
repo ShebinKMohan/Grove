@@ -13,13 +13,14 @@ import {
     branchExistsLocally,
     branchExistsOnRemote,
 } from "../utils/git";
-import { ensureGitignored } from "./gitignore";
+import { ensureGitignored, removeFromGitignore } from "./gitignore";
 import { installDependencies, type PackageManager } from "../utils/package-manager";
 import { log } from "../utils/logger";
 import {
     GroveError,
     BranchAlreadyCheckedOutError,
     WorktreePathExistsError,
+    GitLockError,
 } from "../utils/errors";
 
 // ────────────────────────────────────────────
@@ -40,14 +41,14 @@ export interface WorktreeInfo {
     behind: number;
 }
 
-export interface WorktreeStatus {
+interface WorktreeStatus {
     modified: number;
     staged: number;
     untracked: number;
     conflicts: number;
 }
 
-export interface BranchStrategy {
+interface BranchStrategy {
     branch: string;
     newBranch: boolean;
     startPoint: string;
@@ -60,7 +61,7 @@ export interface CreationResult {
     description: string;
 }
 
-export interface CleanupResult {
+interface CleanupResult {
     path: string;
     removed: boolean;
     branchDeleted?: string | "failed";
@@ -148,7 +149,7 @@ export async function resolveBranchStrategy(
  * Compute the absolute path for a new worktree.
  * Places worktrees in: <repo-root>/<worktreeDir>/<branch-slug>
  */
-export function computeWorktreePath(
+function computeWorktreePath(
     repoRoot: string,
     branchName: string,
     worktreeDir: string = DEFAULT_WORKTREE_DIR
@@ -451,6 +452,11 @@ export async function removeWorktree(
 
     const result: CleanupResult = { path: wtPath, removed: true };
 
+    // Clean up .gitignore entry
+    if (removeFromGitignore(repoRoot, wtPath)) {
+        log(`Removed ${wtPath} from .gitignore`);
+    }
+
     // Optionally delete branch
     if (
         options.deleteBranch &&
@@ -464,7 +470,8 @@ export async function removeWorktree(
             const delArgs = ["branch", options.force ? "-D" : "-d", branchName];
             await gitWrite(delArgs, repoRoot);
             result.branchDeleted = branchName;
-        } catch {
+        } catch (err) {
+            log(`Could not delete branch '${branchName}': ${err instanceof Error ? err.message : String(err)}`);
             result.branchDeleted = "failed";
         }
     }
@@ -489,6 +496,80 @@ export async function getChangedFiles(
     } catch {
         return [];
     }
+}
+
+export interface ChangedFile {
+    /** Relative file path within the worktree */
+    filePath: string;
+    /** Change type */
+    status: "added" | "modified" | "deleted" | "renamed";
+}
+
+/**
+ * Get files changed in a worktree with their status (added/modified/deleted).
+ * Uses `git diff --name-status` against the base branch.
+ * Falls back to `git status --porcelain` for uncommitted changes.
+ */
+export async function getChangedFilesWithStatus(
+    worktreePath: string,
+    baseBranch: string = "main"
+): Promise<ChangedFile[]> {
+    const files: ChangedFile[] = [];
+    const seen = new Set<string>();
+
+    // 1. Committed changes vs base branch
+    try {
+        const raw = await git(
+            ["diff", "--name-status", `${baseBranch}...HEAD`],
+            worktreePath
+        );
+        if (raw) {
+            for (const line of raw.split("\n")) {
+                if (!line) continue;
+                const tab = line.indexOf("\t");
+                if (tab === -1) continue;
+                const code = line.slice(0, tab).trim();
+                const filePath = line.slice(tab + 1).trim();
+                if (!filePath) continue;
+                const status = parseGitStatusCode(code);
+                files.push({ filePath, status });
+                seen.add(filePath);
+            }
+        }
+    } catch {
+        // Base branch may not exist — fall through to status check
+    }
+
+    // 2. Uncommitted changes (working tree + index)
+    try {
+        const raw = await git(["status", "--porcelain"], worktreePath);
+        if (raw) {
+            for (const line of raw.split("\n")) {
+                if (!line || line.length < 3) continue;
+                const filePath = line.slice(3).trim();
+                if (!filePath || seen.has(filePath)) continue;
+                const x = line[0];
+                const y = line[1];
+                let status: ChangedFile["status"] = "modified";
+                if (x === "?" && y === "?") status = "added";
+                else if (x === "A" || y === "A") status = "added";
+                else if (x === "D" || y === "D") status = "deleted";
+                else if (x === "R" || y === "R") status = "renamed";
+                files.push({ filePath, status });
+            }
+        }
+    } catch {
+        // Ignore
+    }
+
+    return files;
+}
+
+function parseGitStatusCode(code: string): ChangedFile["status"] {
+    if (code.startsWith("A")) return "added";
+    if (code.startsWith("D")) return "deleted";
+    if (code.startsWith("R")) return "renamed";
+    return "modified";
 }
 
 /**
@@ -525,9 +606,33 @@ function throwFriendlyWorktreeError(
     if (msg.includes("already exists")) {
         throw new WorktreePathExistsError(wtPath);
     }
+    if (msg.includes("index.lock") || (msg.includes("Unable to create") && msg.includes(".lock"))) {
+        throw new GitLockError("git worktree add");
+    }
+    if (msg.includes("not a valid object name") || msg.includes("invalid reference") || msg.includes("bad revision")) {
+        throw new GroveError(
+            `The base branch or starting point for '${branch}' does not exist.`,
+            "Make sure the base branch exists locally. Run 'git fetch --all' to update remote refs, or choose a different base branch.",
+            err instanceof Error ? err : undefined
+        );
+    }
+    if (msg.includes("EACCES") || msg.includes("permission denied")) {
+        throw new GroveError(
+            `Permission denied when creating worktree for '${branch}'.`,
+            "Check file permissions for the target directory.",
+            err instanceof Error ? err : undefined
+        );
+    }
+    if (msg.includes("ENOSPC") || msg.includes("no space")) {
+        throw new GroveError(
+            `Disk is full — cannot create worktree for '${branch}'.`,
+            "Free up disk space and try again.",
+            err instanceof Error ? err : undefined
+        );
+    }
     throw new GroveError(
-        `Failed to create worktree for branch '${branch}' at ${wtPath}.`,
-        `Original error: ${msg}`,
+        `Failed to create worktree for branch '${branch}'.`,
+        "Check the Grove output channel for details.",
         err instanceof Error ? err : undefined
     );
 }

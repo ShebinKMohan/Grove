@@ -17,7 +17,7 @@ import { log, logError } from "../utils/logger";
 // Types
 // ────────────────────────────────────────────
 
-export type SessionStatus =
+type SessionStatus =
     | "running"
     | "idle"
     | "completed"
@@ -234,8 +234,8 @@ export class SessionTracker implements vscode.Disposable {
                 baseBranch
             );
             this._onDidChangeSessions.fire();
-        } catch {
-            // Ignore — files might not be available
+        } catch (err) {
+            log(`Could not refresh file list for session ${session.branch}: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
 
@@ -312,8 +312,8 @@ export class SessionTracker implements vscode.Disposable {
                 session.worktreePath,
                 baseBranch
             );
-        } catch {
-            // Ignore
+        } catch (err) {
+            log(`Could not get final file list for session ${session.branch}: ${err instanceof Error ? err.message : String(err)}`);
         }
 
         this.terminalMap.delete(terminal);
