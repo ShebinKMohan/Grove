@@ -2,7 +2,7 @@
   "name": "grove-pilot",
   "displayName": "Grove — Worktree Control for Claude Code",
   "description": "Control plane for parallel AI development — git worktree management, Claude Code session orchestration, and merge intelligence",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "ShebinMohanK",
   "author": {
     "name": "Shebin K Mohan",
@@ -13,11 +13,11 @@
   "pricing": "Free",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ShebinKMohan/WorkTree_Pilot"
+    "url": "https://github.com/ShebinKMohan/Grove"
   },
-  "homepage": "https://github.com/ShebinKMohan/WorkTree_Pilot#readme",
+  "homepage": "https://github.com/ShebinKMohan/Grove#readme",
   "bugs": {
-    "url": "https://github.com/ShebinKMohan/WorkTree_Pilot/issues"
+    "url": "https://github.com/ShebinKMohan/Grove/issues"
   },
   "galleryBanner": {
     "color": "#1e1e2e",

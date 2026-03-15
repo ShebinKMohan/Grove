@@ -1,6 +1,6 @@
 /**
  * Auto-manage .gitignore entries for worktree directories.
- * Mirrors worktree_pilot/utils/gitignore.py
+ * Gitignore utilities for Grove worktree management.
  */
 
 import * as fs from "fs";

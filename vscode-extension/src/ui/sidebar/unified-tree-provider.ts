@@ -3,7 +3,7 @@
  * three separate worktree, session, and team providers.
  *
  * Visual structure:
- *   WORKTREE PILOT
+ *   GROVE
  *     -- Workflow hint (dynamic next-step)
  *     ── ── ── separator ── ── ──
  *     -- Teams (if any)

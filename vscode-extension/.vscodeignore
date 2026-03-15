@@ -19,5 +19,4 @@ tsconfig.json
 .grove/**
 .claude/**
 *.vsix
-DOCUMENTATION.md
 CLAUDE.md
