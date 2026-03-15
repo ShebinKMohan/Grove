@@ -237,6 +237,15 @@ export class DashboardPanel implements vscode.Disposable {
             case "view-diff": {
                 const worktreePath = message.worktreePath as string;
                 const branch = message.branch as string;
+
+                // Check if the worktree directory still exists
+                if (!fs.existsSync(worktreePath)) {
+                    void vscode.window.showWarningMessage(
+                        `Worktree directory no longer exists: ${branch}\n\nThe worktree may have been deleted or cleaned up.`
+                    );
+                    break;
+                }
+
                 const config =
                     vscode.workspace.getConfiguration("grove");
                 const baseBranch = config.get<string>(
@@ -244,19 +253,33 @@ export class DashboardPanel implements vscode.Disposable {
                     "main"
                 );
                 const safeBranch = sanitizeRefName(baseBranch);
-                const terminal = openTerminal(
-                    `Diff: ${branch}`,
-                    worktreePath
-                );
-                // Show all changes: committed vs base + uncommitted working tree
-                terminal.sendText(
-                    `echo "── Committed changes vs ${safeBranch} ──" && ` +
-                    `git diff ${safeBranch}...HEAD --stat 2>/dev/null; ` +
-                    `echo "" && echo "── Uncommitted changes (working tree) ──" && ` +
-                    `git diff --stat; ` +
-                    `echo "" && echo "── Staged changes ──" && ` +
-                    `git diff --cached --stat`
-                );
+
+                // For the base branch itself, only show uncommitted changes
+                if (branch === baseBranch) {
+                    const terminal = openTerminal(
+                        `Diff: ${branch}`,
+                        worktreePath
+                    );
+                    terminal.sendText(
+                        `echo "── Uncommitted changes ──" && ` +
+                        `git diff --stat; ` +
+                        `echo "" && echo "── Staged changes ──" && ` +
+                        `git diff --cached --stat`
+                    );
+                } else {
+                    const terminal = openTerminal(
+                        `Diff: ${branch}`,
+                        worktreePath
+                    );
+                    terminal.sendText(
+                        `echo "── Changes vs ${safeBranch} ──" && ` +
+                        `git diff ${safeBranch}...HEAD --stat 2>/dev/null; ` +
+                        `echo "" && echo "── Uncommitted changes ──" && ` +
+                        `git diff --stat; ` +
+                        `echo "" && echo "── Staged changes ──" && ` +
+                        `git diff --cached --stat`
+                    );
+                }
                 break;
             }
 

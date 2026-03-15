@@ -6,6 +6,7 @@
  */
 
 import * as vscode from "vscode";
+import * as fs from "fs";
 import * as path from "path";
 import { getRepoRoot, getCurrentBranch, listLocalBranches, git, gitWrite, sanitizeRefName } from "./utils/git";
 import { showAutoInfo, showAutoWarning, showAutoError } from "./ui/notifications";
@@ -1024,10 +1025,12 @@ async function activateWithRepo(
             async (item?: WorktreeItem) => {
                 if (!item?.worktree) return;
                 try {
-                    const terminal = openTerminal(
-                        `Diff: ${item.worktree.branch}`,
-                        item.worktree.path
-                    );
+                    if (!fs.existsSync(item.worktree.path)) {
+                        void showAutoWarning(
+                            `Worktree directory no longer exists: ${item.worktree.branch}`
+                        );
+                        return;
+                    }
                     const config = vscode.workspace.getConfiguration(
                         "grove"
                     );
@@ -1035,7 +1038,20 @@ async function activateWithRepo(
                         "defaultBaseBranch",
                         "main"
                     );
-                    terminal.sendText(`git diff ${sanitizeRefName(baseBranch)}...HEAD --stat`);
+                    const safeBranch = sanitizeRefName(baseBranch);
+                    const terminal = openTerminal(
+                        `Diff: ${item.worktree.branch}`,
+                        item.worktree.path
+                    );
+                    if (item.worktree.isMain) {
+                        terminal.sendText(
+                            `git diff --stat && echo "" && git diff --cached --stat`
+                        );
+                    } else {
+                        terminal.sendText(
+                            `git diff ${safeBranch}...HEAD --stat`
+                        );
+                    }
                 } catch (err) {
                     void showAutoError(
                         formatErrorForUser(err, "Failed to view diff")
