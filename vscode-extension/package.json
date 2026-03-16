@@ -2,7 +2,7 @@
   "name": "grove-pilot",
   "displayName": "Grove — Worktree Control for Claude Code",
   "description": "Control plane for parallel AI development — git worktree management, Claude Code session orchestration, and merge intelligence",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "ShebinMohanK",
   "author": {
     "name": "Shebin K Mohan",

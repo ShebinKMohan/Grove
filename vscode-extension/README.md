@@ -17,7 +17,8 @@ Built for developers who use [Claude Code](https://code.claude.com) and want to 
 - **Merge intelligence** — auto-commits tracked changes, captures a recovery hash, and walks you through sequential merges with conflict resolution, test gates, and abort safety
 - **Clean `.gitignore` management** — worktree paths are auto-committed to `.gitignore` on creation and cleaned up on deletion, keeping your base branch always clean
 - **Live dashboard** — WebView panel with two-column session cards, directory-grouped file activity with clickable diffs, and overlap alerts. Teams persist across restarts
-- **Worktree management** — create, monitor, sync, diff, and clean up worktrees without leaving your editor
+- **Worktree management** — create, monitor, sync, push, diff, and clean up worktrees without leaving your editor
+- **Nested repo support** — works even when your workspace root isn't a git repo. Automatically detects nested git repos or lets you pick one manually via `Grove: Select Git Repository`
 - **User-friendly errors** — every error includes what went wrong and how to fix it. No raw git output or cryptic stack traces
 
 ## Requirements
@@ -56,6 +57,7 @@ code --install-extension ShebinMohanK.grove-pilot
 | `Grove: Check File Overlaps` | Scan for files modified in multiple worktrees |
 | `Grove: Cleanup Stale Worktrees` | Batch remove worktrees with confirmation |
 | `Grove: Stop All Sessions` | Stop all running Claude Code sessions |
+| `Grove: Select Git Repository` | Switch which git repo Grove operates on |
 | `Grove: Quick Menu` | Access all commands from the status bar |
 
 ## Configuration

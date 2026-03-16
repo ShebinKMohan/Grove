@@ -1,6 +1,6 @@
 # Grove — Worktree Control for Claude Code
 
-> **Version:** 0.4.0
+> **Version:** 0.5.0
 > **Type:** VS Code / Cursor Extension
 > **License:** MIT
 
@@ -176,6 +176,21 @@ code --install-extension grove-pilot-0.2.4.vsix --force
 4. The status bar (bottom) shows a `$(layers) Grove` quick menu
 
 No additional configuration is needed. The extension auto-detects your git setup, package manager, and test commands.
+
+### Nested Repository Support
+If your workspace root is not a git repository (e.g., a parent folder containing multiple projects):
+- Grove automatically scans immediate subdirectories for git repos
+- If one repo is found, it's used automatically
+- If multiple repos are found, a picker lets you choose which one to use
+- Your selection persists across VS Code restarts
+- To switch later, run `Grove: Select Git Repository` from the Command Palette
+
+### Auto-Refresh
+The sidebar refreshes automatically:
+- Every **30 seconds** when Claude Code sessions are active
+- Every **60 seconds** when idle
+- Existing worktrees appear immediately on activation without needing a manual refresh
+- The Refresh button also runs `git fetch` so ahead/behind counts update
 
 ---
 
@@ -1050,6 +1065,7 @@ All commands are available via `Cmd+Shift+P` (macOS) or `Ctrl+Shift+P` (Windows/
 | `Grove: Execute Merge Sequence` | Run the guided merge process |
 | `Grove: Cleanup Stale Worktrees` | Find and remove idle worktrees |
 | `Grove: Stop All Sessions` | Close all active Claude Code terminals |
+| `Grove: Select Git Repository` | Switch which git repo Grove operates on |
 | `Grove: Quick Menu` | Open the status bar quick menu |
 
 **Sidebar-only commands** (available via icons and right-click menus):

@@ -147,8 +147,8 @@ export class DashboardPanel implements vscode.Disposable {
 
         // Set the tab icon
         panel.iconPath = {
-            light: vscode.Uri.joinPath(extensionUri, "media", "icon.svg"),
-            dark: vscode.Uri.joinPath(extensionUri, "media", "icon.svg"),
+            light: vscode.Uri.joinPath(extensionUri, "media", "icon.png"),
+            dark: vscode.Uri.joinPath(extensionUri, "media", "icon.png"),
         };
 
         DashboardPanel.currentPanel = new DashboardPanel(

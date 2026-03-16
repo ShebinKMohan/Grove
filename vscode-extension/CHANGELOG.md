@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.4.0] - 2026-03-16
+## [0.5.0] - 2026-03-17
 
 ### Added
 - **Pre-merge conflict prediction** — merge report now predicts conflicts against the base branch using `git merge-tree` (exact, Git 2.38+) with a file-overlap heuristic fallback. Shows "Predicted Merge Conflicts" and "Files Changed on Both Base & Branch" sections before you merge
@@ -8,6 +8,10 @@
 - **Push to Remote button** — cloud-upload icon appears on worktrees that are ahead of remote. Pushes with `-u` flag to set up tracking. Handles rejected pushes with helpful messaging
 - **Refresh fetches remote** — the sidebar Refresh button now runs `git fetch --all --prune` so ahead/behind counts are up to date and sync/push buttons appear correctly
 - **`.gitignore` auto-management** — worktree paths are now committed to `.gitignore` immediately on creation and removed + committed on deletion, keeping the base branch always clean
+- **Nested git repo detection** — if the workspace root is not a git repo, Grove scans subdirectories and auto-selects (or lets user pick) the correct repo
+- **Select Repository command** — `Grove: Select Git Repository` lets users manually switch which repo Grove operates on, with a folder browser option. Persists across restarts
+- **Auto-refresh sidebar** — sidebar refreshes every 60s (30s when sessions active) so worktree status stays current without manual refresh. Existing worktrees now appear immediately on activation
+- **Dashboard tab icon** — dashboard panel shows the Grove icon instead of the default generic icon
 
 ### Changed
 - **Dashboard layout** — session cards now use a two-column grid layout instead of a single column, making better use of space when monitoring multiple sessions
