@@ -108,7 +108,7 @@ export class DashboardPanel implements vscode.Disposable {
             this.disposables
         );
 
-        // Start periodic refresh (every 5s for elapsed times)
+        // Start periodic refresh (every 5s for session status updates)
         this.refreshInterval = setInterval(() => {
             if (this.panel.visible) {
                 void this.sendUpdate();
@@ -144,6 +144,12 @@ export class DashboardPanel implements vscode.Disposable {
                 ],
             }
         );
+
+        // Set the tab icon
+        panel.iconPath = {
+            light: vscode.Uri.joinPath(extensionUri, "media", "icon.svg"),
+            dark: vscode.Uri.joinPath(extensionUri, "media", "icon.svg"),
+        };
 
         DashboardPanel.currentPanel = new DashboardPanel(
             panel,

@@ -194,6 +194,12 @@
         "icon": "$(cloud-upload)"
       },
       {
+        "command": "grove.selectRepository",
+        "title": "Select Git Repository",
+        "category": "Grove",
+        "icon": "$(repo)"
+      },
+      {
         "command": "grove.quickMenu",
         "title": "Quick Menu",
         "category": "Grove",

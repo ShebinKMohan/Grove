@@ -103,6 +103,7 @@ const ALL_COMMAND_IDS: readonly string[] = [
     "grove.pushWorktree",
     "grove.quickMenu",
     "grove.openFileDiff",
+    "grove.selectRepository",
 ] as const;
 
 /**
@@ -163,41 +164,203 @@ export async function activate(
         return;
     }
 
-    const workspaceRoot = workspaceFolders[0].uri.fsPath;
+    let repoRoot: string | undefined;
 
-    let repoRoot: string;
-    try {
-        repoRoot = await getRepoRoot(workspaceRoot);
-    } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        const isGitMissing = detail.toLowerCase().includes("enoent") ||
-            detail.toLowerCase().includes("not found");
-
-        if (isGitMissing) {
-            log("git not found in PATH");
-            registerStubCommands(
-                context,
-                "Git not found",
-                "Grove requires git. Install git and make sure it is in your PATH, then reload the window (⇧⌘P → Reload Window)."
-            );
-            void vscode.window.showErrorMessage(
-                "Grove: git is not installed or not in your PATH. Install git and reload the window."
-            );
-        } else {
-            log(`Not a git repository: ${detail}`);
-            registerStubCommands(
-                context,
-                "Not a git repository",
-                "This folder is not a git repository. Run 'git init' in the terminal or open a folder that already has a .git directory, then reload the window."
-            );
-            void vscode.window.showWarningMessage(
-                "Grove is inactive — this folder is not a git repository. Run 'git init' or open a git project."
-            );
+    // Check if user previously selected a repo for this workspace
+    const savedRepo = context.workspaceState.get<string>("grove.selectedRepoRoot");
+    if (savedRepo) {
+        try {
+            repoRoot = await getRepoRoot(savedRepo);
+            log(`Using previously selected repo: ${repoRoot}`);
+        } catch {
+            // Saved repo no longer valid — clear and re-detect
+            await context.workspaceState.update("grove.selectedRepoRoot", undefined);
         }
+    }
+
+    // Try each workspace folder, then scan subdirectories for git repos
+    if (!repoRoot) {
+        for (const folder of workspaceFolders) {
+            try {
+                repoRoot = await getRepoRoot(folder.uri.fsPath);
+                break;
+            } catch {
+                // Not a git repo — continue checking
+            }
+        }
+    }
+
+    // If no workspace folder is a git repo, scan immediate subdirectories
+    if (!repoRoot) {
+        const rootDir = workspaceFolders[0].uri.fsPath;
+        const gitRepos: Array<{ label: string; path: string }> = [];
+        try {
+            const entries = fs.readdirSync(rootDir, { withFileTypes: true });
+            for (const entry of entries) {
+                if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+                const subPath = path.join(rootDir, entry.name);
+                try {
+                    const repo = await getRepoRoot(subPath);
+                    gitRepos.push({ label: entry.name, path: repo });
+                } catch {
+                    // Not a git repo
+                }
+            }
+        } catch {
+            // Can't read directory
+        }
+
+        if (gitRepos.length === 1) {
+            // Only one git repo found — use it automatically
+            repoRoot = gitRepos[0].path;
+            log(`Auto-selected nested git repo: ${repoRoot}`);
+        } else if (gitRepos.length > 1) {
+            // Multiple repos — let user pick
+            const pick = await vscode.window.showQuickPick(
+                gitRepos.map((r) => ({
+                    label: r.label,
+                    detail: r.path,
+                    repoPath: r.path,
+                })),
+                {
+                    placeHolder: "Select a git repository for Grove",
+                    title: "Grove: Multiple Git Repos Found",
+                }
+            );
+            if (pick) {
+                repoRoot = pick.repoPath;
+            }
+        }
+    }
+
+    if (!repoRoot) {
+        // Check if git is missing vs. no repo
+        try {
+            await getRepoRoot(workspaceFolders[0].uri.fsPath);
+        } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            const isGitMissing = detail.toLowerCase().includes("enoent") ||
+                detail.toLowerCase().includes("not found");
+
+            if (isGitMissing) {
+                log("git not found in PATH");
+                registerStubCommands(
+                    context,
+                    "Git not found",
+                    "Grove requires git. Install git and make sure it is in your PATH, then reload the window (⇧⌘P → Reload Window)."
+                );
+                void vscode.window.showErrorMessage(
+                    "Grove: git is not installed or not in your PATH. Install git and reload the window."
+                );
+                return;
+            }
+        }
+
+        log("No git repository found in workspace or subdirectories");
+        registerStubCommands(
+            context,
+            "No git repository found",
+            "No git repository found in this folder or its subdirectories. Run 'git init' or open a folder with a git project, then reload the window."
+        );
+        void vscode.window.showWarningMessage(
+            "Grove is inactive — no git repository found in this workspace or its subdirectories."
+        );
         return;
     }
 
+    // Save the selected repo for future activations
+    await context.workspaceState.update("grove.selectedRepoRoot", repoRoot);
     log(`Git repo found: ${repoRoot}`);
+
+    // ── Register grove.selectRepository (always available) ──
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            "grove.selectRepository",
+            async () => {
+                const folders = vscode.workspace.workspaceFolders;
+                if (!folders) return;
+
+                const repos: Array<{ label: string; detail: string; repoPath: string }> = [];
+
+                // Check each workspace folder
+                for (const folder of folders) {
+                    try {
+                        const repo = await getRepoRoot(folder.uri.fsPath);
+                        repos.push({
+                            label: path.basename(repo),
+                            detail: repo,
+                            repoPath: repo,
+                        });
+                    } catch {
+                        // Not a git repo
+                    }
+
+                    // Scan subdirectories
+                    try {
+                        const entries = fs.readdirSync(folder.uri.fsPath, { withFileTypes: true });
+                        for (const entry of entries) {
+                            if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+                            const subPath = path.join(folder.uri.fsPath, entry.name);
+                            try {
+                                const repo = await getRepoRoot(subPath);
+                                if (!repos.some((r) => r.repoPath === repo)) {
+                                    repos.push({
+                                        label: entry.name,
+                                        detail: repo,
+                                        repoPath: repo,
+                                    });
+                                }
+                            } catch {
+                                // Not a git repo
+                            }
+                        }
+                    } catch {
+                        // Can't read directory
+                    }
+                }
+
+                // Also allow browsing for a folder
+                repos.push({
+                    label: "$(folder) Browse for a folder...",
+                    detail: "Select a git repository from your filesystem",
+                    repoPath: "__browse__",
+                });
+
+                const pick = await vscode.window.showQuickPick(repos, {
+                    placeHolder: `Current: ${repoRoot}`,
+                    title: "Grove: Select Git Repository",
+                });
+
+                if (!pick) return;
+
+                let selectedPath = pick.repoPath;
+                if (selectedPath === "__browse__") {
+                    const uri = await vscode.window.showOpenDialog({
+                        canSelectFolders: true,
+                        canSelectFiles: false,
+                        canSelectMany: false,
+                        openLabel: "Select Git Repository",
+                    });
+                    if (!uri || uri.length === 0) return;
+                    try {
+                        selectedPath = await getRepoRoot(uri[0].fsPath);
+                    } catch {
+                        void vscode.window.showErrorMessage(
+                            "The selected folder is not a git repository."
+                        );
+                        return;
+                    }
+                }
+
+                await context.workspaceState.update("grove.selectedRepoRoot", selectedPath);
+                void vscode.window.showInformationMessage(
+                    `Grove will use '${path.basename(selectedPath)}'. Reloading...`
+                );
+                // Reload to re-activate with the new repo
+                await vscode.commands.executeCommand("workbench.action.reloadWindow");
+            }
+        )
+    );
 
     // ── Full initialization (wrapped to guarantee commands are registered) ──
     try {
@@ -267,6 +430,10 @@ async function activateWithRepo(
 
     completedProvider.setTracker(sessionTracker);
     completedProvider.setOrchestrator(orchestrator);
+
+    // Initial refresh so existing worktrees show up immediately
+    unifiedProvider.refresh();
+    completedProvider.refresh();
 
     // ── Git Content Provider (for diff views) ────────────────
 
@@ -372,32 +539,23 @@ async function activateWithRepo(
         sessionTracker.onDidChangeSessions(() => void updateStatusBar())
     );
 
-    // ── Periodic sidebar refresh for elapsed timers ──────────
-    // The sidebar shows "Running · 21s" but TreeView items are static —
-    // they only update on refresh(). This interval ticks the timers
-    // every 30s while sessions are active.
-    let timerInterval: NodeJS.Timeout | undefined;
-
-    function startTimerRefresh(): void {
-        if (timerInterval) return;
-        timerInterval = setInterval(() => {
-            if (sessionTracker.activeCount > 0) {
-                unifiedProvider.refresh();
-            } else {
-                // No active sessions — stop the interval
-                clearInterval(timerInterval!);
-                timerInterval = undefined;
-            }
-        }, 30_000);
+    // ── Periodic sidebar refresh ──────────────────────────────
+    // TreeView items are static — they only update on refresh().
+    // Background refresh keeps worktree status, ahead/behind counts,
+    // and session indicators current without manual refreshing.
+    // 30s with active sessions, 60s when idle.
+    let bgRefreshTimer: NodeJS.Timeout | undefined;
+    function scheduleBgRefresh(): void {
+        const delay = sessionTracker.activeCount > 0 ? 30_000 : 60_000;
+        bgRefreshTimer = setTimeout(() => {
+            refreshAll();
+            scheduleBgRefresh();
+        }, delay);
     }
+    scheduleBgRefresh();
 
     context.subscriptions.push(
-        sessionTracker.onDidChangeSessions(() => {
-            if (sessionTracker.activeCount > 0) {
-                startTimerRefresh();
-            }
-        }),
-        { dispose: () => { if (timerInterval) clearInterval(timerInterval); } }
+        { dispose: () => { if (bgRefreshTimer) clearTimeout(bgRefreshTimer); } }
     );
 
     // ── Workspace folder changes (add/remove worktree from Explorer) ──

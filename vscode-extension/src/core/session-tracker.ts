@@ -267,25 +267,6 @@ export class SessionTracker implements vscode.Disposable {
         this._onDidChangeSessions.fire();
     }
 
-    /**
-     * Get elapsed time string for a session.
-     */
-    getElapsedTime(session: SessionInfo): string {
-        const start = new Date(session.startedAt).getTime();
-        const end = session.endedAt
-            ? new Date(session.endedAt).getTime()
-            : Date.now();
-        const elapsed = end - start;
-
-        const seconds = Math.floor(elapsed / 1000);
-        if (seconds < 60) return `${seconds}s`;
-        const minutes = Math.floor(seconds / 60);
-        if (minutes < 60) return `${minutes}m`;
-        const hours = Math.floor(minutes / 60);
-        const remainingMinutes = minutes % 60;
-        return `${hours}h ${remainingMinutes}m`;
-    }
-
     // ── Private ─────────────────────────────────────────────
 
     private async handleTerminalClose(
