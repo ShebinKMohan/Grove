@@ -31,7 +31,7 @@ import { SessionTracker } from "./session-tracker";
 import { launchClaude } from "../utils/terminal";
 import { log, logError } from "../utils/logger";
 import { formatErrorForUser } from "../utils/errors";
-import { showAutoInfo } from "../ui/notifications";
+import { showAutoInfo, showAutoWarning } from "../ui/notifications";
 
 // ────────────────────────────────────────────
 // Types
@@ -700,7 +700,7 @@ export class AgentOrchestrator implements vscode.Disposable {
             }
         } catch (err) {
             logError("Failed to set agent teams env var", err);
-            void vscode.window.showWarningMessage(
+            void showAutoWarning(
                 "Grove: Could not enable Agent Teams in Claude settings (~/.claude/settings.json). " +
                 "Teams may not work correctly. Check file permissions."
             );

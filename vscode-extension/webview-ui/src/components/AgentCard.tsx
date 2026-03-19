@@ -42,7 +42,7 @@ export function AgentCard({ session }: AgentCardProps) {
 
     const statusLabel =
         session.status === "running"
-            ? "Running"
+            ? "Active"
             : session.status === "idle"
               ? "Waiting"
               : session.status === "completed"

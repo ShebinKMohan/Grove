@@ -13,11 +13,10 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import { SessionTracker } from "../../core/session-tracker";
-import { sanitizeRefName } from "../../utils/git";
 import { OverlapDetector } from "../../core/overlap-detector";
 import { listAllWorktrees } from "../../core/worktree-manager";
-import { openTerminal } from "../../utils/terminal";
 import { log, logError } from "../../utils/logger";
+import { showAutoInfo, showAutoWarning } from "../../ui/notifications";
 
 /** Serializable session info for the WebView */
 interface WebViewSessionInfo {
@@ -244,47 +243,50 @@ export class DashboardPanel implements vscode.Disposable {
                 const worktreePath = message.worktreePath as string;
                 const branch = message.branch as string;
 
-                // Check if the worktree directory still exists
                 if (!fs.existsSync(worktreePath)) {
-                    void vscode.window.showWarningMessage(
-                        `Worktree directory no longer exists: ${branch}\n\nThe worktree may have been deleted or cleaned up.`
+                    void showAutoWarning(
+                        `Worktree directory no longer exists: ${branch}. It may have been deleted.`
                     );
                     break;
                 }
 
+                // Open the first changed file's diff in VS Code's visual diff editor
                 const config =
                     vscode.workspace.getConfiguration("grove");
                 const baseBranch = config.get<string>(
                     "defaultBaseBranch",
                     "main"
                 );
-                const safeBranch = sanitizeRefName(baseBranch);
 
-                // For the base branch itself, only show uncommitted changes
-                if (branch === baseBranch) {
-                    const terminal = openTerminal(
-                        `Diff: ${branch}`,
-                        worktreePath
+                try {
+                    const { getChangedFilesWithStatus } = await import(
+                        "../../core/worktree-manager"
                     );
-                    terminal.sendText(
-                        `echo "── Uncommitted changes ──" && ` +
-                        `git diff --stat; ` +
-                        `echo "" && echo "── Staged changes ──" && ` +
-                        `git diff --cached --stat`
+                    const files = await getChangedFilesWithStatus(
+                        worktreePath,
+                        baseBranch
                     );
-                } else {
-                    const terminal = openTerminal(
-                        `Diff: ${branch}`,
-                        worktreePath
+                    if (files.length === 0) {
+                        void showAutoWarning(`No changes found in ${branch}.`);
+                        break;
+                    }
+                    // Open the first modified file in diff editor
+                    const firstModified = files.find(
+                        (f) => f.status === "modified"
+                    ) ?? files[0];
+                    await vscode.commands.executeCommand(
+                        "grove.openFileDiff",
+                        worktreePath,
+                        firstModified.filePath,
+                        baseBranch
                     );
-                    terminal.sendText(
-                        `echo "── Changes vs ${safeBranch} ──" && ` +
-                        `git diff ${safeBranch}...HEAD --stat 2>/dev/null; ` +
-                        `echo "" && echo "── Uncommitted changes ──" && ` +
-                        `git diff --stat; ` +
-                        `echo "" && echo "── Staged changes ──" && ` +
-                        `git diff --cached --stat`
-                    );
+                    if (files.length > 1) {
+                        void showAutoInfo(
+                            `Showing diff for ${firstModified.filePath}. Expand the worktree in Grove sidebar to see all ${files.length} changed files.`
+                        );
+                    }
+                } catch {
+                    void showAutoWarning(`Could not load changes for ${branch}.`);
                 }
                 break;
             }

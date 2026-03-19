@@ -1,6 +1,6 @@
 # Grove — Worktree Control for Claude Code
 
-> **Version:** 0.5.0
+> **Version:** 0.6.0
 > **Type:** VS Code / Cursor Extension
 > **License:** MIT
 
@@ -166,7 +166,7 @@ grove/
 
 ### Install the Extension
 ```bash
-code --install-extension grove-pilot-0.2.4.vsix --force
+code --install-extension ShebinMohanK.grove-pilot
 ```
 
 ### First Launch
@@ -235,7 +235,7 @@ The sidebar uses a single unified tree with these node types:
 | `$(git-branch)` | Green | Active Worktree | Worktree with a running session |
 | `$(git-merge)` | Red | Conflict Worktree | Worktree with merge conflicts |
 | `$(warning)` | Red | Missing Worktree | Worktree directory not found on disk |
-| `$(play-circle)` | Green | Running Session | Active Claude Code session |
+| `$(play-circle)` | Green | Active Session | Active Claude Code session |
 | `$(watch)` | Yellow | Idle Session | Session waiting for input |
 | `$(check)` | Blue | Completed Session | Finished Claude Code session |
 | `$(close-dirty)` | Red | Error Session | Session that ended with errors |
@@ -247,7 +247,7 @@ The sidebar uses a single unified tree with these node types:
 |------|-------|--------|
 | `$(circle-outline)` | Grey | Pending — not yet launched |
 | `$(loading~spin)` | Yellow | Launching — worktree being created |
-| `$(sync~spin)` | Green | Running — Claude is active |
+| `$(sync~spin)` | Green | Active — Claude session running |
 | `$(pass)` | Blue | Completed — agent finished |
 | `$(error)` | Red | Error — agent failed |
 | `$(debug-stop)` | Grey | Stopped — manually stopped |
@@ -258,7 +258,6 @@ The sidebar uses a single unified tree with these node types:
 - `$(rocket)` Launch Claude Code — start a Claude session
 - `$(terminal)` Open in Terminal — open a plain terminal
 - `$(multiple-windows)` Open in New Window — open in separate VS Code window
-- `$(diff)` View Diff — show changes vs base branch
 - `$(trash)` Delete Worktree — remove worktree and branch
 
 **On an active session:**
@@ -346,8 +345,8 @@ Step 3 ─ Monitor
   Sidebar: Session appears as child of the worktree with status
 
 Step 4 ─ Review
-  Sidebar: Right-click worktree → "View Diff"
-  → See all changes vs main branch
+  Sidebar: Expand worktree → click any changed file
+  → Opens VS Code's visual side-by-side diff editor
 
 Step 5 ─ Merge
   Command Palette: "Grove: Generate Merge Report"
@@ -471,18 +470,19 @@ Step 4 ─ Cleanup
 5. Auto-adds worktree path to `.gitignore`
 
 **File Browsing:**
-- Expand any worktree in the sidebar to see all changed files (committed + uncommitted vs base branch)
+- Expand any worktree in the sidebar to see all changed files (committed + uncommitted vs base branch). This includes the main worktree — uncommitted/staged changes show up there too
 - Each file shows its name, directory path, and change status with color-coded icons:
   - Green `+` for added files
   - Yellow `~` for modified files
   - Red `-` for deleted files
   - Blue `→` for renamed files
-- **Click a modified file** to open VS Code's side-by-side diff editor (base branch vs worktree)
+- **Click a modified file** to open VS Code's side-by-side diff editor with full syntax highlighting on both sides (base branch vs worktree)
 - **Click an added file** to open it directly
+- **Safety:** if a file was deleted or renamed since the diff was computed, a warning is shown instead of crashing. New files (not yet on the base branch) open directly instead of showing an empty diff
 
 **Delete Worktree:**
 - Safety check: warns if there are uncommitted changes or active sessions
-- Options: "Delete Worktree Only" or "Delete + Local Branch" (clearly labeled — remote branch is never touched)
+- Options: "Delete Worktree Only", "Delete + Local Branch", or "Delete + Local & Remote Branch" (the remote option only appears when the branch exists on a remote)
 - Protected branches (main, master, develop, production) cannot be deleted
 - Automatically removes the worktree's `.gitignore` entry on deletion
 
@@ -504,14 +504,9 @@ Step 4 ─ Cleanup
 - Auto-stashes uncommitted changes, pulls, then reapplies them — no code is lost
 - Also available via right-click → "Sync from Remote" (only shown when behind)
 
-**Push to Remote:**
-- The cloud-upload icon appears only when a worktree is ahead of the remote
-- Runs `git push -u origin <branch>` to push and set up tracking
-- Handles rejected pushes with a helpful "sync first" message
-
 **Ahead/Behind Indicators:**
-- Each worktree shows `↓3` (behind remote) and `↑1` (ahead of remote) in the sidebar
-- Counts update when you click the Refresh button (which runs `git fetch --all --prune`)
+- Each worktree shows `↓3` (behind remote) in the sidebar description
+- Counts update automatically via background `git fetch` (every 30s with active sessions, 60s idle) and when you click the Refresh button
 - Tooltip shows detailed sync status
 
 **`.gitignore` Auto-Management:**
@@ -530,10 +525,13 @@ Step 4 ─ Cleanup
 
 **Session Lifecycle:**
 1. **Launch** — click rocket icon or "Launch Claude Code" on a worktree
-2. **Running** — terminal is active, Claude Code working
+2. **Active** — terminal is active, Claude Code working
 3. **Idle** — terminal open but Claude waiting for input
 4. **Completed** — terminal closed normally
 5. **Error** — terminal closed with error state
+
+**Terminal Styling:**
+- Claude Code terminals show a green color and git-branch icon in the terminal tab for easy identification among other terminals
 
 **Session Data:**
 - Branch name and worktree path
@@ -548,8 +546,9 @@ Step 4 ─ Cleanup
 - Last 5 completed sessions shown under "Recent" in sidebar
 
 **Notifications:**
-- VS Code notification when a session completes
-- Action button: "View Diff" to inspect changes
+- VS Code notification when a session completes with "View Diff" action
+- "View Diff" opens VS Code's visual side-by-side diff editor on the first changed file
+- Expand worktree in sidebar to browse and diff all changed files
 
 **Existing Session Detection:**
 - When launching Claude in a worktree that had a previous session, offers:
@@ -725,20 +724,29 @@ If the template defines `mergeOrder`, that is used. Otherwise, smart ordering ba
 | Tests | 5th (score 80) | Test the integrated result |
 | No changes | Skip (score 100) | Nothing to merge |
 
+**Simplified Merge Flow (2-3 dialogs max):**
+1. Pick target branch (any local branch, not just main)
+2. Select worktree branches to merge (multi-select, pre-sorted by recommended order)
+3. Only if conflicts predicted: warning with "Merge Anyway" / "View Report" (otherwise proceeds)
+
 **Pre-Merge Safety:**
-1. Checks for active Claude sessions in worktrees being merged — offers "Stop All & Continue" or "Cancel"
+1. Stops active sessions in worktrees being merged (with confirmation)
 2. Saves all open VS Code files (`saveAll`)
 3. Verifies the repo is in a clean state (no in-progress merge/rebase)
+4. Sorts branches by recommended merge order (types → core → API → UI → tests)
 
 **Merge Execution:**
-For each worktree in order:
-1. Auto-commit uncommitted changes (`git add -u` for tracked files only — won't stage .env or CLAUDE.md)
-2. Checkout base branch (main)
+For each worktree in sorted order:
+1. Auto-commit uncommitted changes (`git add -u` for tracked files only)
+2. Checkout target branch
 3. Merge the worktree's branch (`git merge <branch>`)
-4. If conflict: pause, show conflicting files, let user resolve
-5. If clean: optionally run tests
-6. If tests pass: continue to next merge
-7. If tests fail: pause with "Continue Anyway" / "Open Terminal" / "Abort" — "Open Terminal" pauses the sequence to let you investigate
+4. If conflict: opens conflicting files in VS Code's visual merge editor (Accept Current/Incoming/Both)
+5. User resolves → "I've Resolved — Continue" / "Skip This Branch" / "Abort All"
+6. If clean: auto-runs tests if detected (no dialog — only prompts on failure)
+
+**Post-Merge:**
+- Summary shows succeeded/failed count
+- Actions: "Push to Remote" / "Cleanup Worktrees" / "Done"
 
 **Abort Semantics:**
 - Captures a pre-merge commit hash (`git rev-parse HEAD`) before the first merge
@@ -785,6 +793,13 @@ Checks (in order): `package.json` scripts, `pytest.ini`, `go.mod`, `Cargo.toml`
 - Respects VS Code light/dark/high-contrast themes
 - Uses VS Code CSS variables for colors
 - Status colors match sidebar icon colors
+
+**Notifications:**
+- All fire-and-forget notifications truly auto-dismiss from the UI using `withProgress(ProgressLocation.Notification)`
+- Info: 5 seconds, Warning: 7 seconds, Error: 10 seconds
+- A countdown shows in the last 3 seconds: `Message · 3s` → `2s` → `1s` → dismissed
+- Modal dialogs (confirmations, conflict resolution) stay visible until the user responds
+- Notifications with action buttons (e.g., "Launch Claude Code", "Open Dashboard") stay visible for user interaction
 
 ---
 
@@ -1073,11 +1088,9 @@ All commands are available via `Cmd+Shift+P` (macOS) or `Ctrl+Shift+P` (Windows/
 | Command | Icon | Where |
 |---------|------|-------|
 | `Grove: Sync from Remote` | `$(cloud-download)` | Worktree inline icon (only when behind remote), right-click menu |
-| `Grove: Push to Remote` | `$(cloud-upload)` | Worktree inline icon (only when ahead of remote), right-click menu |
 | `Grove: Launch Claude Code in Worktree` | `$(rocket)` | Worktree inline icon |
 | `Grove: Open in Terminal` | `$(terminal)` | Worktree inline icon |
 | `Grove: Delete Worktree` | — | Worktree right-click menu |
-| `Grove: View Diff` | — | Worktree right-click menu |
 | `Grove: Open in New Window` | — | Worktree right-click menu |
 | `Grove: Stop Session` | `$(debug-stop)` | Session inline icon |
 | `Grove: Open Session Terminal` | `$(terminal)` | Session inline icon |

@@ -72,9 +72,9 @@ class WorkflowHintItem extends vscode.TreeItem {
             title: commandTitle,
             command: commandId,
         };
-        this.tooltip = new vscode.MarkdownString(
-            `$(${icon}) **Next step:** ${label}`
-        );
+        const tip = new vscode.MarkdownString(`$(${icon}) **Next step:** ${label}`);
+        tip.supportThemeIcons = true;
+        this.tooltip = tip;
     }
 
     private static resolve(
@@ -265,7 +265,7 @@ export class AgentItem extends vscode.TreeItem {
             case "launching":
                 return "Launching";
             case "running":
-                return "Running";
+                return "Active";
             case "completed":
                 return "Done";
             case "error":
@@ -362,10 +362,7 @@ export class WorktreeItem extends vscode.TreeItem {
     }
 
     private resolveContextValue(): string {
-        const suffixes: string[] = [];
-        if (this.worktree.behind > 0) suffixes.push("behind");
-        if (this.worktree.ahead > 0) suffixes.push("ahead");
-        const suffix = suffixes.length > 0 ? `-${suffixes.join("-")}` : "";
+        const suffix = this.worktree.behind > 0 ? "-behind" : "";
         if (this.worktree.isMain) return `worktree-main${suffix}`;
         if (this.hasActiveSession) return `worktree-with-session${suffix}`;
         return `worktree${suffix}`;
@@ -561,7 +558,7 @@ export class SessionItem extends vscode.TreeItem {
     private static statusLabel(session: SessionInfo): string {
         switch (session.status) {
             case "running":
-                return "Running";
+                return "Active";
             case "idle":
                 return "Idle";
             case "completed":
@@ -877,10 +874,7 @@ export class UnifiedTreeProvider
         }
 
         // 2. Changed files (committed + uncommitted vs base branch)
-        if (
-            !worktreeItem.worktree.isMain &&
-            worktreeItem.worktree.statusSummary !== "missing"
-        ) {
+        if (worktreeItem.worktree.statusSummary !== "missing") {
             try {
                 const config = vscode.workspace.getConfiguration("grove");
                 const baseBranch = config.get<string>(

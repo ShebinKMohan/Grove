@@ -2,7 +2,7 @@
   "name": "grove-pilot",
   "displayName": "Grove — Worktree Control for Claude Code",
   "description": "Control plane for parallel AI development — git worktree management, Claude Code session orchestration, and merge intelligence",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "ShebinMohanK",
   "author": {
     "name": "Shebin K Mohan",
@@ -51,163 +51,151 @@
     "commands": [
       {
         "command": "grove.createWorktree",
-        "title": "Create Worktree",
+        "title": "Create Worktree — pick a base branch and create an isolated worktree",
         "category": "Grove",
         "icon": "$(add)"
       },
       {
         "command": "grove.deleteWorktree",
-        "title": "Delete Worktree",
+        "title": "Delete Worktree — remove worktree and optionally its branches",
         "category": "Grove",
         "icon": "$(trash)"
       },
       {
         "command": "grove.cleanupWorktrees",
-        "title": "Cleanup Stale Worktrees",
+        "title": "Cleanup Stale Worktrees — batch remove idle worktrees",
         "category": "Grove",
         "icon": "$(trash)"
       },
       {
         "command": "grove.launchSession",
-        "title": "Launch Claude Code in Worktree",
+        "title": "Launch Claude Code — start a Claude session in this worktree",
         "category": "Grove",
         "icon": "$(rocket)"
       },
       {
         "command": "grove.openDashboard",
-        "title": "Open Dashboard",
+        "title": "Open Dashboard — monitor sessions, file activity, and overlaps",
         "category": "Grove",
         "icon": "$(dashboard)"
       },
       {
         "command": "grove.openInTerminal",
-        "title": "Open in Terminal",
+        "title": "Open in Terminal — open a shell in this worktree directory",
         "category": "Grove",
         "icon": "$(terminal)"
       },
       {
         "command": "grove.openInNewWindow",
-        "title": "Open in New Window",
+        "title": "Open in New Window — open this worktree in a separate VS Code window",
         "category": "Grove",
         "icon": "$(multiple-windows)"
       },
       {
-        "command": "grove.viewDiff",
-        "title": "View Diff",
-        "category": "Grove",
-        "icon": "$(diff)"
-      },
-      {
         "command": "grove.stopSession",
-        "title": "Stop Session",
+        "title": "Stop Session — close this Claude Code terminal",
         "category": "Grove",
         "icon": "$(debug-stop)"
       },
       {
         "command": "grove.stopAllSessions",
-        "title": "Stop All Sessions",
+        "title": "Stop All Sessions — close all running Claude Code terminals",
         "category": "Grove",
         "icon": "$(debug-stop)"
       },
       {
         "command": "grove.focusSession",
-        "title": "Open Session Terminal",
+        "title": "Open Session Terminal — bring this session's terminal to focus",
         "category": "Grove",
         "icon": "$(terminal)"
       },
       {
         "command": "grove.setTaskDescription",
-        "title": "Set Task Description",
+        "title": "Set Task Description — label what this session is working on",
         "category": "Grove",
         "icon": "$(edit)"
       },
       {
         "command": "grove.clearCompletedSessions",
-        "title": "Clear Completed Sessions",
+        "title": "Clear Completed Sessions — remove finished sessions from the list",
         "category": "Grove",
         "icon": "$(clear-all)"
       },
       {
         "command": "grove.refreshSidebar",
-        "title": "Refresh",
+        "title": "Refresh Worktrees & Sync Status",
         "category": "Grove",
         "icon": "$(refresh)"
       },
       {
         "command": "grove.launchTeam",
-        "title": "Launch Agent Team",
+        "title": "Launch Agent Team — deploy multiple Claude agents in parallel",
         "category": "Grove",
         "icon": "$(organization)"
       },
       {
         "command": "grove.stopTeam",
-        "title": "Stop Team",
+        "title": "Stop Team — stop all agents in this team",
         "category": "Grove",
         "icon": "$(debug-stop)"
       },
       {
         "command": "grove.stopAgent",
-        "title": "Stop Agent",
+        "title": "Stop Agent — close this agent's Claude Code terminal",
         "category": "Grove",
         "icon": "$(debug-stop)"
       },
       {
         "command": "grove.focusAgent",
-        "title": "Open Agent Terminal",
+        "title": "Open Agent Terminal — bring this agent's terminal to focus",
         "category": "Grove",
         "icon": "$(terminal)"
       },
       {
         "command": "grove.cleanupTeam",
-        "title": "Cleanup Team Worktrees",
+        "title": "Cleanup Team Worktrees — delete all worktrees created by this team",
         "category": "Grove",
         "icon": "$(trash)"
       },
       {
         "command": "grove.runOverlapCheck",
-        "title": "Check File Overlaps",
+        "title": "Check File Overlaps — scan for files modified in multiple worktrees",
         "category": "Grove",
         "icon": "$(shield)"
       },
       {
         "command": "grove.generateMergeReport",
-        "title": "Generate Merge Report",
+        "title": "Generate Merge Report — analyze worktrees for conflicts and merge readiness",
         "category": "Grove",
         "icon": "$(checklist)"
       },
       {
         "command": "grove.executeMergeSequence",
-        "title": "Execute Merge Sequence",
+        "title": "Execute Merge Sequence — merge worktree branches into a target branch",
         "category": "Grove",
         "icon": "$(merge)"
       },
       {
         "command": "grove.syncWorktree",
-        "title": "Sync from Remote",
+        "title": "Sync from Remote — pull latest changes from the remote branch",
         "category": "Grove",
         "icon": "$(cloud-download)"
       },
       {
-        "command": "grove.pushWorktree",
-        "title": "Push to Remote",
-        "category": "Grove",
-        "icon": "$(cloud-upload)"
-      },
-      {
         "command": "grove.selectRepository",
-        "title": "Select Git Repository",
+        "title": "Select Git Repository — switch which repo Grove operates on",
         "category": "Grove",
         "icon": "$(repo)"
       },
       {
         "command": "grove.quickMenu",
-        "title": "Quick Menu",
+        "title": "Show All Grove Commands",
         "category": "Grove",
         "icon": "$(layers)"
       },
       {
         "command": "grove.openFileDiff",
-        "title": "Show Diff",
+        "title": "Show Diff — compare file against the base branch version",
         "category": "Grove",
         "icon": "$(diff)"
       }
@@ -283,11 +271,6 @@
           "group": "inline@2"
         },
         {
-          "command": "grove.pushWorktree",
-          "when": "viewItem =~ /^worktree/ && viewItem =~ /ahead/",
-          "group": "inline@3"
-        },
-        {
           "command": "grove.openInTerminal",
           "when": "viewItem =~ /^worktree/",
           "group": "inline@4"
@@ -305,16 +288,6 @@
         {
           "command": "grove.syncWorktree",
           "when": "viewItem =~ /^worktree/ && viewItem =~ /behind/",
-          "group": "2_inspect"
-        },
-        {
-          "command": "grove.pushWorktree",
-          "when": "viewItem =~ /^worktree/ && viewItem =~ /ahead/",
-          "group": "2_inspect"
-        },
-        {
-          "command": "grove.viewDiff",
-          "when": "viewItem =~ /^worktree/",
           "group": "2_inspect"
         },
         {
@@ -375,10 +348,6 @@
       ],
       "commandPalette": [
         {
-          "command": "grove.pushWorktree",
-          "when": "false"
-        },
-        {
           "command": "grove.syncWorktree",
           "when": "false"
         },
@@ -396,10 +365,6 @@
         },
         {
           "command": "grove.deleteWorktree",
-          "when": "false"
-        },
-        {
-          "command": "grove.viewDiff",
           "when": "false"
         },
         {

@@ -157,6 +157,7 @@ export async function launchClaude(
         : claudePath;
     const execCmd = [quotedPath, ...claudeArgs].join(" ");
 
+    const iconPath = new vscode.ThemeIcon("git-branch");
     let terminalOptions: vscode.TerminalOptions;
 
     if (process.platform === "win32") {
@@ -166,6 +167,8 @@ export async function launchClaude(
             cwd,
             shellPath: "powershell.exe",
             shellArgs: ["-NoProfile", "-Command", `& ${execCmd}`],
+            color: new vscode.ThemeColor("terminal.ansiGreen"),
+            iconPath,
         };
     } else {
         // macOS/Linux: clean shell → drain IDE injections → exec claude
@@ -187,6 +190,8 @@ export async function launchClaude(
             cwd,
             shellPath,
             shellArgs: [...shellFlags, "-c", shellCmd],
+            color: new vscode.ThemeColor("terminal.ansiGreen"),
+            iconPath,
             // Do NOT use strictEnv — it strips critical env vars like
             // ANTHROPIC_API_KEY, SSH_AUTH_SOCK, proxy settings, etc.
             env: {

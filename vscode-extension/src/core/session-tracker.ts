@@ -11,7 +11,6 @@ import * as fs from "fs";
 import * as path from "path";
 import { getChangedFiles } from "./worktree-manager";
 import { ensureGroveDirIgnored } from "./gitignore";
-import { sanitizeRefName } from "../utils/git";
 import { log, logError } from "../utils/logger";
 
 // ────────────────────────────────────────────
@@ -317,14 +316,24 @@ export class SessionTracker implements vscode.Disposable {
                 "Dismiss"
             );
             if (action === "View Diff") {
-                const diffTerminal = vscode.window.createTerminal({
-                    name: `Diff: ${session.branch}`,
-                    cwd: session.worktreePath,
-                });
-                diffTerminal.show();
                 const config = vscode.workspace.getConfiguration("grove");
                 const baseBranch = config.get<string>("defaultBaseBranch", "main");
-                diffTerminal.sendText(`git diff ${sanitizeRefName(baseBranch)}...HEAD --stat`);
+                try {
+                    const { getChangedFilesWithStatus } = await import("./worktree-manager");
+                    const files = await getChangedFilesWithStatus(session.worktreePath, baseBranch);
+                    const firstModified = files.find((f) => f.status === "modified") ?? files[0];
+                    if (firstModified) {
+                        await vscode.commands.executeCommand(
+                            "grove.openFileDiff",
+                            session.worktreePath,
+                            firstModified.filePath,
+                            baseBranch
+                        );
+                    }
+                } catch {
+                    // Fallback: just open the worktree folder
+                    await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(session.worktreePath), true);
+                }
             }
         }
     }

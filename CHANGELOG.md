@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.6.0] - 2026-03-19
+
+### Added
+- **Merge target branch picker** — merge report and merge execution now let you pick any local branch as the target (not just the default base branch). Merge `feature/api → develop` or `experiment/voice → staging`
+- **Smart merge ordering** — worktree branches are automatically sorted by dependency before merging (types/models → core/utils → API → UI → tests) using the recommended merge order from the report
+- **Visual conflict resolution** — merge conflicts now open conflicting files in VS Code's built-in merge editor with Accept Current/Incoming/Both buttons, instead of a terminal
+- **Push after merge** — post-merge summary offers "Push to Remote" to push the merged branch in one click
+- **Delete worktree with remote branch** — delete dialog now offers "Delete + Local & Remote Branch" when the branch exists on a remote, in addition to "Delete Worktree Only" and "Delete + Local Branch"
+- **Auto-fetch in background** — periodic refresh now includes `git fetch` so ahead/behind indicators and sync button stay current without manual refresh
+- **Descriptive command tooltips** — every command in the palette now includes a short description (e.g., "Launch Claude Code — start a Claude session in this worktree"). Refresh reads "Refresh Worktrees & Sync Status", Quick Menu reads "Show All Grove Commands"
+
+### Fixed
+- **Diff view syntax highlighting** — the left side (base branch) of the diff editor now shows full syntax coloring. Previously it was plain white text because the `grove-git:` URI path didn't include the file extension; VS Code couldn't detect the language
+- **Diff view safety** — opening a diff on a deleted/renamed file now shows a warning instead of crashing. New files (not on base branch) open directly instead of showing an empty diff
+- **Workflow hint icons** — sidebar "next step" hints now render theme icons correctly (`supportThemeIcons` was missing)
+
+### Changed
+- **Notifications truly auto-dismiss** — rewrote notification system to use `vscode.window.withProgress(ProgressLocation.Notification)` which actually removes notifications from the UI. Previous `Promise.race` approach only stopped waiting but left the toast visible. Countdown shows in the last 3 seconds (info: 5s, warning: 7s, error: 10s)
+- **All notifications use auto-dismiss** — replaced every remaining raw `vscode.window.showErrorMessage`/`showWarningMessage`/`showInformationMessage` call (activation errors, repo selection, stub commands) with the auto-dismiss `showAutoError`/`showAutoWarning`/`showAutoInfo` helpers
+- **Merge flow simplified** — reduced from 5+ dialogs to 2-3. Removed test picker dialog (auto-detects and runs silently), removed redundant confirmation dialog, base overlap warnings are now silent (only confirmed conflicts block)
+- **"Running" → "Active"** — session status label changed since we can't verify if Claude is actively working or idle
+- **Dashboard "View Changes"** — now opens VS Code's visual side-by-side diff editor (red/green highlights) instead of a terminal with `git diff --stat`
+- **Session completion "View Diff"** — notification action now opens VS Code's inline diff editor on the first changed file instead of spawning a terminal with `git diff --stat`
+- **Claude terminals styled** — Claude Code terminal tabs now show a green color and git-branch icon for easy identification among other terminals
+
+### Removed
+- **"View Diff" context menu command** — replaced by inline file browsing (expand worktree → click file → visual diff). Less clutter, better UX
+- **Push to Remote sidebar button** — removed from sidebar since VS Code's built-in git handles push. The sync/pull button remains as a visual "behind remote" indicator
+- **Stale code cleanup** — removed unused `getElapsedTime()` from SessionTracker, unused imports (`sanitizeRefName`, `openTerminal`) from dashboard-panel.ts and session-tracker.ts, dead `grove.viewDiff` and `grove.pushWorktree` commands, `-ahead` context suffix from sidebar items
+
 ## [0.5.0] - 2026-03-17
 
 ### Added
