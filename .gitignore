@@ -31,3 +31,4 @@ Thumbs.db
 # Ruff
 .ruff_cache/
 /.grove/
+node_modules/
