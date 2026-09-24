@@ -10,7 +10,7 @@ Built for developers who use [Claude Code](https://code.claude.com) and want to 
 
 - **One-click agent teams** — pick a template (Full-Stack, Code Review, Debug Squad, Migration, Rapid Prototype), enter your task, and Grove creates isolated worktrees, generates per-agent CLAUDE.md files that assign each agent its own area of the codebase, and launches all sessions in parallel
 - **Base branch selection** — choose which branch to create worktrees from, with all local branches listed (default base branch first)
-- **Inline file browsing with smart base detection** — expand any worktree to see changed files compared against the branch it was actually created from (not always `main`), just like GitHub PR diffs. Click a file to open a visual side-by-side diff
+- **Inline file browsing** — expand any worktree to see its changed files, compared against your configured base branch (`grove.defaultBaseBranch`, `main` by default). Click a file to open a visual side-by-side diff
 - **Smart sync indicator** — sync button appears when behind remote, so you know at a glance which branches need pulling. Background `git fetch` keeps counts up to date automatically
 - **Pre-merge conflict prediction** — before merging, Grove predicts conflicts against the base branch using `git merge-tree` and warns you with the exact files that will conflict
 - **Real-time overlap detection** — file watchers monitor every worktree and alert you the moment two agents touch the same file, ranked by severity (conflict / warning / info)
