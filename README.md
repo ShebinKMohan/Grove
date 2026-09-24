@@ -8,18 +8,18 @@ Built for developers who use [Claude Code](https://code.claude.com) and want to 
 
 ## What It Does
 
-- **One-click agent teams** — pick a template (Full-Stack, Code Review, Debug Squad, Migration, Rapid Prototype), enter your task, and Grove creates isolated worktrees, generates per-agent CLAUDE.md files that assign each agent its own area of the codebase, and launches all sessions in parallel
+- **Agent teams** — pick a template (Full-Stack, Code Review, Debug Squad, Migration, Rapid Prototype), describe the task, name the team, and confirm. Grove creates an isolated worktree per agent, writes each agent a CLAUDE.md listing the files it owns, and starts every Claude Code session so they run in parallel
 - **Base branch selection** — choose which branch to create worktrees from, with all local branches listed (default base branch first)
 - **Inline file browsing** — expand any worktree to see its changed files, compared against your configured base branch (`grove.defaultBaseBranch`, `main` by default). Click a file to open a visual side-by-side diff
 - **Smart sync indicator** — sync button appears when behind remote, so you know at a glance which branches need pulling. Background `git fetch` keeps counts up to date automatically
-- **Pre-merge conflict prediction** — before merging, Grove predicts conflicts against the base branch using `git merge-tree` and warns you with the exact files that will conflict
-- **Real-time overlap detection** — file watchers monitor every worktree and alert you the moment two agents touch the same file, ranked by severity (conflict / warning / info)
-- **Merge intelligence** — pick any target branch, auto-sorts by dependency order, resolves conflicts in VS Code's visual merge editor, runs tests automatically, and offers push after merge — all in 2-3 clicks
+- **Pre-merge conflict check** — before merging, the merge report lists files changed on both the base branch and the worktree branch since they diverged, so you can see where a merge is likely to need attention
+- **Overlap detection** — while two or more agent sessions are running, file watchers on those worktrees flag any file touched in more than one of them, ranked by severity (conflict / warning / info). Watching covers root level files and the common source directories (`src`, `lib`, `app`, `test`, `tests`, `pkg`, `cmd`, `internal`, `config`, `public`, `assets`, `scripts`)
+- **Merge sequencing** — pick a target branch from your local branches, and Grove merges the selected worktree branches in an infrastructure first order (types and models, then core and utils, then API, then UI, then tests), opens conflicting files with VS Code's inline conflict markers for you to resolve, runs your test command after each merge when one is configured or detected, and offers to push once the sequence finishes
 - **Clean `.gitignore` management** — worktree paths are auto-committed to `.gitignore` on creation and cleaned up on deletion, keeping your base branch always clean
-- **Live dashboard** — WebView panel with two-column session cards, directory-grouped file activity with clickable diffs, and overlap alerts. Teams persist across restarts
+- **Live dashboard** — WebView panel with two-column session cards, file activity grouped by directory with clickable diffs, and overlap alerts. Agent teams are saved to `.grove/teams.json` and reappear in the sidebar after a restart, marked stopped, without reconnecting their terminals
 - **Worktree management** — create, monitor, sync, diff, and clean up worktrees without leaving your editor. Diff views show full syntax highlighting on both sides
-- **Nested repo support** — works even when your workspace root isn't a git repo. Automatically detects nested git repos or lets you pick one manually via `Grove: Select Git Repository`
-- **User-friendly errors** — every error includes what went wrong and how to fix it. No raw git output or cryptic stack traces
+- **Nested repo support** — works even when your workspace root isn't a git repo. Grove scans the workspace folder's immediate subdirectories, uses the repo it finds, and asks you to choose when there are several. Once Grove has a repo, `Grove: Select Git Repository` switches to a different one or browses for a folder
+- **Clear error messages** — the common git failures (git missing, locked index, branch already checked out, no tracking branch, merge conflicts, disk full) are rewritten in plain English with a suggested fix. Anything Grove does not recognise falls back to git's own message
 
 ## Requirements
 
@@ -50,7 +50,7 @@ code --install-extension ShebinMohanK.grove-pilot
 | Command | Description |
 |---|---|
 | `Grove: Create Worktree` | Create a new worktree from a selected base branch |
-| `Grove: Launch Agent Team` | One-click parallel agent launch from a template |
+| `Grove: Launch Agent Team` | Launch a team of parallel agents from a template |
 | `Grove: Open Dashboard` | Open the real-time monitoring dashboard |
 | `Grove: Generate Merge Report` | Analyze all worktrees for merge readiness |
 | `Grove: Execute Merge Sequence` | Guided sequential merge with test gates |
@@ -58,7 +58,7 @@ code --install-extension ShebinMohanK.grove-pilot
 | `Grove: Cleanup Stale Worktrees` | Batch remove worktrees with confirmation |
 | `Grove: Stop All Sessions` | Stop all running Claude Code sessions |
 | `Grove: Select Git Repository` | Switch which git repo Grove operates on |
-| `Grove: Quick Menu` | Access all commands from the status bar |
+| `Grove: Show All Grove Commands` | Quick menu of Grove's main commands, also on the status bar |
 
 ## Configuration
 
