@@ -1,8 +1,8 @@
-# Grove — Worktree Control for Claude Code
+# Grove — Merge Control for Parallel Claude Code Agents
 
-> Orchestrate multiple Claude Code agents across git worktrees from one IDE sidebar.
+> Run several Claude Code agents at once and see where they collide before you merge.
 
-Built for developers who use [Claude Code](https://code.claude.com) and want to run multiple agents in parallel without the manual worktree juggling, file conflicts, and merge nightmares.
+Built for developers who run several [Claude Code](https://code.claude.com) agents on one repository. Each agent works in its own git worktree, Grove shows you when two of them touch the same file while they are still working, and it merges their branches back in a guided sequence.
 
 <!-- ![Grove in action](media/grove-demo.gif) -->
 
