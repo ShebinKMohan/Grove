@@ -10,7 +10,7 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import { getChangedFiles } from "./worktree-manager";
-import { ensureGroveDirIgnored } from "./gitignore";
+import { excludeGroveDir } from "./gitignore";
 import { log, logError } from "../utils/logger";
 
 // ────────────────────────────────────────────
@@ -355,8 +355,9 @@ export class SessionTracker implements vscode.Disposable {
             const dir = path.dirname(this.sessionsFilePath);
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
-                ensureGroveDirIgnored(this.repoRoot);
             }
+            // Also covers a .grove/ that an earlier version created.
+            excludeGroveDir(this.repoRoot);
 
             const data: PersistedSession[] = [...this.sessions.values()].map(
                 (s) => ({

@@ -14,7 +14,12 @@ import {
     getWorktreeStatus,
     listAllWorktrees,
     PROTECTED_BRANCHES,
+    createWorktree,
+    removeWorktree,
+    listUncommittedChanges,
 } from "../../src/core/worktree-manager";
+import { agentInstructionsPath } from "../../src/core/claude-md-generator";
+import { createTempRepo, gitIn, isolateGitEnv, type TempRepo } from "../helpers/git-repo";
 
 describe("worktree-manager", () => {
     let tmpDir: string;
@@ -176,5 +181,161 @@ describe("worktree-manager", () => {
             const worktrees = await listAllWorktrees(tmpDir);
             assert.strictEqual(worktrees[0].statusSummary, "clean");
         });
+    });
+});
+
+// Regression tests for a 0.6.0 bug, reproduced before the fix: Grove committed
+// .gitignore with no pathspec, sweeping the user's staged files into its
+// commit on whatever branch the main worktree had checked out.
+describe("worktree-manager: create/remove never commit or touch the index", () => {
+    let restoreEnv: () => void;
+    let repo: TempRepo;
+
+    beforeEach(() => {
+        restoreEnv = isolateGitEnv();
+        repo = createTempRepo();
+    });
+
+    afterEach(() => {
+        repo.cleanup();
+        restoreEnv();
+    });
+
+    const commitCount = (): number => Number(repo.git("rev-list", "--count", "--all"));
+    const staged = (): string[] => repo.git("diff", "--cached", "--name-only").split("\n").filter(Boolean);
+
+    it("createWorktree leaves the user's staged file staged and makes no commit", async () => {
+        repo.write("user-wip.txt", "work in progress\n");
+        repo.git("add", "user-wip.txt");
+        const headBefore = repo.head();
+        const countBefore = commitCount();
+
+        const result = await createWorktree(repo.root, "feat-x", { autoGitignore: true });
+
+        assert.strictEqual(repo.head(), headBefore);
+        assert.strictEqual(commitCount(), countBefore);
+        assert.deepStrictEqual(staged(), ["user-wip.txt"]);
+        assert.strictEqual(repo.exists(".gitignore"), false);
+        // The new worktree directory is ignored locally, so only the user's file shows.
+        assert.strictEqual(repo.git("status", "--porcelain"), "A  user-wip.txt");
+        assert.ok(repo.read(".git/info/exclude").includes("/.claude/worktrees/feat-x/"));
+        assert.ok(fs.existsSync(result.path));
+    });
+
+    it("removeWorktree leaves the user's staged file staged and makes no commit", async () => {
+        const result = await createWorktree(repo.root, "feat-x", { autoGitignore: true });
+        repo.write("user-wip.txt", "work in progress\n");
+        repo.git("add", "user-wip.txt");
+        const headBefore = repo.head();
+        const countBefore = commitCount();
+
+        await removeWorktree(repo.root, result.path, { deleteBranch: true });
+
+        assert.strictEqual(repo.head(), headBefore);
+        assert.strictEqual(commitCount(), countBefore);
+        assert.deepStrictEqual(staged(), ["user-wip.txt"]);
+        assert.ok(!repo.read(".git/info/exclude").includes("/.claude/worktrees/feat-x/"));
+        assert.strictEqual(fs.existsSync(result.path), false);
+        assert.strictEqual(repo.git("branch", "--list", "feat-x"), "");
+    });
+
+    async function resolvedMergeInProgress(): Promise<string> {
+        repo.git("checkout", "-q", "-b", "side");
+        repo.commit("side edit", { "a.txt": "side\n" });
+        repo.git("checkout", "-q", "main");
+        repo.commit("main edit", { "a.txt": "main\n" });
+        try {
+            repo.git("merge", "side");
+        } catch {
+            // Expected conflict
+        }
+        // The user resolves and stages the merge but has not committed it yet.
+        repo.write("a.txt", "resolved\n");
+        repo.git("add", "a.txt");
+        return repo.head();
+    }
+
+    it("createWorktree does not conclude a merge the user has resolved but not committed", async () => {
+        const headBefore = await resolvedMergeInProgress();
+
+        await createWorktree(repo.root, "feat-y", { autoGitignore: true });
+
+        assert.strictEqual(repo.head(), headBefore);
+        assert.ok(repo.exists(".git/MERGE_HEAD"), "the user's merge must still be in progress");
+    });
+
+    it("removeWorktree does not conclude a merge the user has resolved but not committed", async () => {
+        const result = await createWorktree(repo.root, "feat-y", { autoGitignore: true });
+        const headBefore = await resolvedMergeInProgress();
+
+        await removeWorktree(repo.root, result.path, {});
+
+        assert.strictEqual(repo.head(), headBefore);
+        assert.ok(repo.exists(".git/MERGE_HEAD"), "the user's merge must still be in progress");
+    });
+
+    it("leaves a .gitignore line written by Grove 0.6.0 alone on removal", async () => {
+        const legacy = "# Grove managed worktrees\n/.claude/worktrees/feat-x/\n";
+        repo.commit("0.6.0 ignore", { ".gitignore": legacy });
+        const result = await createWorktree(repo.root, "feat-x", { autoGitignore: true });
+        const headBefore = repo.head();
+
+        await removeWorktree(repo.root, result.path, { deleteBranch: true });
+
+        assert.strictEqual(repo.read(".gitignore"), legacy);
+        assert.strictEqual(repo.head(), headBefore);
+        assert.strictEqual(repo.git("status", "--porcelain"), "");
+    });
+
+    it("removeWorktree deletes the worktree's agent instructions file", async () => {
+        const result = await createWorktree(repo.root, "feat-x", { autoGitignore: true });
+        const instructions = agentInstructionsPath(repo.root, result.path);
+        fs.mkdirSync(path.dirname(instructions), { recursive: true });
+        fs.writeFileSync(instructions, "# role\n");
+
+        await removeWorktree(repo.root, result.path, {});
+
+        assert.strictEqual(fs.existsSync(instructions), false);
+    });
+
+    it("without force, removeWorktree refuses a worktree with untracked files", async () => {
+        const result = await createWorktree(repo.root, "feat-x", { autoGitignore: true });
+        fs.writeFileSync(path.join(result.path, "new.ts"), "export {};\n");
+
+        await assert.rejects(removeWorktree(repo.root, result.path, { deleteBranch: true }));
+        assert.ok(fs.existsSync(path.join(result.path, "new.ts")));
+    });
+
+    it("without force, removeWorktree refuses untracked files even with status.showUntrackedFiles=no", async () => {
+        repo.git("config", "status.showUntrackedFiles", "no");
+        const result = await createWorktree(repo.root, "feat-x", { autoGitignore: true });
+        fs.writeFileSync(path.join(result.path, "new.ts"), "export {};\n");
+        // Plain git status would call this worktree clean.
+        assert.strictEqual(gitIn(result.path, "status", "--porcelain"), "");
+
+        await assert.rejects(removeWorktree(repo.root, result.path, {}));
+        assert.ok(fs.existsSync(path.join(result.path, "new.ts")));
+        assert.strictEqual((await getWorktreeStatus(result.path)).untracked, 1);
+    });
+
+    it("listUncommittedChanges reports tracked changes and each untracked file", async () => {
+        const result = await createWorktree(repo.root, "feat-x", { autoGitignore: true });
+        const wt = result.path;
+        fs.writeFileSync(path.join(wt, "README.md"), "changed\n");
+        fs.mkdirSync(path.join(wt, "src", "api"), { recursive: true });
+        fs.writeFileSync(path.join(wt, "src", "api", "todo.ts"), "export {};\n");
+        fs.writeFileSync(path.join(wt, " leading space.txt"), "x\n");
+        fs.writeFileSync(path.join(wt, "caf\u00e9.md"), "x\n");
+        fs.writeFileSync(path.join(wt, ".gitignore"), "ignored.log\n");
+        fs.writeFileSync(path.join(wt, "ignored.log"), "x\n");
+
+        const changes = await listUncommittedChanges(wt);
+
+        assert.deepStrictEqual(changes.tracked, ["README.md"]);
+        assert.deepStrictEqual(
+            [...changes.untracked].sort(),
+            [" leading space.txt", ".gitignore", "caf\u00e9.md", "src/api/todo.ts"].sort()
+        );
+        assert.strictEqual(gitIn(wt, "rev-parse", "--abbrev-ref", "HEAD"), "feat-x");
     });
 });

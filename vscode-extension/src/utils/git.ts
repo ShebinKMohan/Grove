@@ -57,14 +57,20 @@ const writeMutex = new GitMutex();
 /**
  * Execute a git command and return stdout.
  * Uses execFile (no shell) to avoid injection risks.
+ * Pass `{ trim: false }` for `-z` or porcelain output, where leading
+ * whitespace is significant.
  */
-export async function git(args: string[], cwd: string): Promise<string> {
+export async function git(
+    args: string[],
+    cwd: string,
+    options: { trim?: boolean } = {}
+): Promise<string> {
     try {
         const { stdout } = await execFileAsync("git", args, {
             cwd,
             maxBuffer: MAX_BUFFER,
         });
-        return stdout.trim();
+        return options.trim === false ? stdout : stdout.trim();
     } catch (err) {
         const error = err as { stderr?: string; message?: string };
         let message = error.stderr?.trim() || error.message || String(err);

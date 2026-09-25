@@ -13,7 +13,8 @@ import {
     branchExistsLocally,
     branchExistsOnRemote,
 } from "../utils/git";
-import { ensureGitignored, removeFromGitignore } from "./gitignore";
+import { excludeWorktreePath, removeWorktreeExclusion } from "./gitignore";
+import { agentInstructionsPath } from "./claude-md-generator";
 import { installDependencies, type PackageManager } from "../utils/package-manager";
 import { log } from "../utils/logger";
 import {
@@ -220,7 +221,8 @@ export async function getWorktreeStatus(
     worktreePath: string
 ): Promise<WorktreeStatus> {
     try {
-        const raw = await git(["status", "--porcelain"], worktreePath);
+        // -unormal: count untracked files even if status.showUntrackedFiles=no
+        const raw = await git(["status", "--porcelain", "--untracked-files=normal"], worktreePath);
         const status: WorktreeStatus = {
             modified: 0,
             staged: 0,
@@ -382,20 +384,13 @@ export async function createWorktree(
         throwFriendlyWorktreeError(err, strategy.branch, wtPath);
     }
 
-    // Auto-gitignore — commit immediately so the base branch stays clean
-    // and doesn't block future merges with uncommitted changes.
+    // Keep the worktree directory out of `git status` in the main worktree
+    // (an untracked directory would block the merge sequence). The rule
+    // goes in .git/info/exclude, so Grove makes no commit and never
+    // touches the user's .gitignore or staged files.
     if (options.autoGitignore !== false) {
-        if (ensureGitignored(repoRoot, wtPath)) {
-            try {
-                await gitWrite(["add", ".gitignore"], repoRoot);
-                await gitWrite(
-                    ["commit", "-m", `chore: gitignore worktree path for ${branchName}`],
-                    repoRoot
-                );
-                log("Committed .gitignore update for worktree path");
-            } catch {
-                log("Could not auto-commit .gitignore (may already be committed)");
-            }
+        if (excludeWorktreePath(repoRoot, wtPath)) {
+            log(`Added ${wtPath} to .git/info/exclude`);
         }
     }
 
@@ -420,7 +415,10 @@ export async function removeWorktree(
     wtPath: string,
     options: {
         deleteBranch?: boolean;
+        /** Remove the worktree even if it has uncommitted or untracked files. */
         force?: boolean;
+        /** Delete the branch with -D even if unmerged. Defaults to `force`. */
+        forceDeleteBranch?: boolean;
         protectedBranches?: string[];
     } = {}
 ): Promise<CleanupResult> {
@@ -444,6 +442,21 @@ export async function removeWorktree(
         return resolvedW === resolvedWtPath;
     });
     const branchName = wt?.branch;
+    // Resolve before removal: the path is keyed on the worktree's real path.
+    const instructionsPath = agentInstructionsPath(repoRoot, wtPath);
+
+    // `git worktree remove` without --force checks `git status`, which hides
+    // untracked files when status.showUntrackedFiles=no. Check independently.
+    if (!options.force && fs.existsSync(wtPath)) {
+        const changes = await listUncommittedChanges(wtPath);
+        const count = changes.tracked.length + changes.untracked.length;
+        if (count > 0) {
+            throw new GroveError(
+                `Worktree at ${wtPath} has ${count} uncommitted or untracked file(s).`,
+                "Commit or remove them first, or use force removal to delete them."
+            );
+        }
+    }
 
     // Remove worktree
     const args = ["worktree", "remove"];
@@ -462,19 +475,13 @@ export async function removeWorktree(
 
     const result: CleanupResult = { path: wtPath, removed: true };
 
-    // Remove the .gitignore entry and commit the change so the
-    // base branch stays clean and doesn't block future merges.
-    if (removeFromGitignore(repoRoot, wtPath)) {
-        try {
-            await gitWrite(["add", ".gitignore"], repoRoot);
-            await gitWrite(
-                ["commit", "-m", `chore: remove gitignore entry for deleted worktree`],
-                repoRoot
-            );
-            log("Committed .gitignore cleanup after worktree removal");
-        } catch {
-            log("Could not auto-commit .gitignore cleanup");
-        }
+    // Drop the local ignore rule and the agent instructions file for the
+    // removed directory. Nothing is committed.
+    removeWorktreeExclusion(repoRoot, wtPath);
+    try {
+        fs.rmSync(instructionsPath, { force: true });
+    } catch (err) {
+        log(`Could not remove agent instructions ${instructionsPath}: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // Optionally delete branch
@@ -487,7 +494,8 @@ export async function removeWorktree(
             : PROTECTED_BRANCHES.has(branchName))
     ) {
         try {
-            const delArgs = ["branch", options.force ? "-D" : "-d", branchName];
+            const forceBranch = options.forceDeleteBranch ?? options.force;
+            const delArgs = ["branch", forceBranch ? "-D" : "-d", branchName];
             await gitWrite(delArgs, repoRoot);
             result.branchDeleted = branchName;
         } catch (err) {
@@ -497,6 +505,32 @@ export async function removeWorktree(
     }
 
     return result;
+}
+
+export interface UncommittedChanges {
+    /** Tracked files that differ from HEAD (modified, deleted or staged). */
+    tracked: string[];
+    /** Untracked files that are not ignored, one entry per file. */
+    untracked: string[];
+}
+
+/**
+ * List what a worktree holds that is not committed yet. Paths are
+ * relative to the worktree root.
+ */
+export async function listUncommittedChanges(
+    worktreePath: string
+): Promise<UncommittedChanges> {
+    const splitNul = (raw: string): string[] => raw.split("\0").filter(Boolean);
+    const [trackedRaw, untrackedRaw] = await Promise.all([
+        git(["diff", "--name-only", "-z", "HEAD"], worktreePath, { trim: false }),
+        git(
+            ["ls-files", "--others", "--exclude-standard", "-z"],
+            worktreePath,
+            { trim: false }
+        ),
+    ]);
+    return { tracked: splitNul(trackedRaw), untracked: splitNul(untrackedRaw) };
 }
 
 /**

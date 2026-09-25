@@ -4,7 +4,7 @@
  * Handles the full lifecycle of an Agent Team:
  * 1. Pre-flight checks (overlaps, env var, cost estimate)
  * 2. Worktree creation per agent
- * 3. Per-agent CLAUDE.md generation
+ * 3. Per-agent instructions (in .grove/agents/, loaded with --append-system-prompt)
  * 4. Session spawning
  * 5. Team state tracking
  *
@@ -24,9 +24,9 @@ import {
     createWorktree,
     removeWorktree,
 } from "./worktree-manager";
-import { generateClaudeMd } from "./claude-md-generator";
+import { writeAgentInstructions } from "./claude-md-generator";
 import { loadProjectConfig } from "./config-manager";
-import { ensureGroveDirIgnored } from "./gitignore";
+import { excludeGroveDir } from "./gitignore";
 import { SessionTracker } from "./session-tracker";
 import { launchClaude } from "../utils/terminal";
 import { log, logError } from "../utils/logger";
@@ -271,7 +271,9 @@ export class AgentOrchestrator implements vscode.Disposable {
 
                     // Track worktrees created in THIS launch for cancellation cleanup
                     const createdWorktreePaths: string[] = [];
-                    const createdClaudeMdPaths: string[] = [];
+                    const createdInstructionPaths: string[] = [];
+                    // Instructions file per agent index, passed to Claude Code at launch
+                    const instructionPaths: Array<string | undefined> = [];
 
                     for (let i = 0; i < totalAgents; i++) {
                         // Check for cancellation between iterations
@@ -279,7 +281,7 @@ export class AgentOrchestrator implements vscode.Disposable {
                             await this.cancelLaunch(
                                 team,
                                 createdWorktreePaths,
-                                createdClaudeMdPaths
+                                createdInstructionPaths
                             );
                             return team;
                         }
@@ -319,9 +321,9 @@ export class AgentOrchestrator implements vscode.Disposable {
                             agentState.branch = result.branch;
                             createdWorktreePaths.push(result.path);
 
-                            // Generate per-agent CLAUDE.md
-                            const claudeMdPath = path.join(result.path, "CLAUDE.md");
-                            generateClaudeMd({
+                            // Per-agent instructions go to .grove/agents/, never into
+                            // the worktree, so a tracked CLAUDE.md is left untouched.
+                            const instructionsPath = writeAgentInstructions({
                                 agent,
                                 template,
                                 taskDescription,
@@ -331,7 +333,8 @@ export class AgentOrchestrator implements vscode.Disposable {
                                 projectConfig,
                                 sharedFiles,
                             });
-                            createdClaudeMdPaths.push(claudeMdPath);
+                            instructionPaths[i] = instructionsPath;
+                            createdInstructionPaths.push(instructionsPath);
 
                             log(`Created worktree for ${agent.displayName}: ${result.path}`);
                         } catch (err) {
@@ -350,7 +353,7 @@ export class AgentOrchestrator implements vscode.Disposable {
                                 await this.cancelLaunch(
                                     team,
                                     createdWorktreePaths,
-                                    createdClaudeMdPaths
+                                    createdInstructionPaths
                                 );
                                 return undefined;
                             }
@@ -365,7 +368,7 @@ export class AgentOrchestrator implements vscode.Disposable {
                             await this.cancelLaunch(
                                 team,
                                 createdWorktreePaths,
-                                createdClaudeMdPaths
+                                createdInstructionPaths
                             );
                             return team;
                         }
@@ -386,7 +389,10 @@ export class AgentOrchestrator implements vscode.Disposable {
                             const terminal = await launchClaude(
                                 agentState.branch,
                                 agentState.worktreePath,
-                                { skipSessionPrompt: true }
+                                {
+                                    skipSessionPrompt: true,
+                                    appendSystemPromptFile: instructionPaths[i],
+                                }
                             );
 
                             if (terminal) {
@@ -434,12 +440,12 @@ export class AgentOrchestrator implements vscode.Disposable {
     }
 
     /**
-     * Cancel an in-progress team launch, cleaning up created worktrees and CLAUDE.md files.
+     * Cancel an in-progress team launch, cleaning up created worktrees and instruction files.
      */
     private async cancelLaunch(
         team: TeamState,
         createdWorktreePaths: string[],
-        createdClaudeMdPaths: string[]
+        createdInstructionPaths: string[]
     ): Promise<void> {
         // Stop any sessions that were already spawned
         for (const agent of team.agents) {
@@ -453,14 +459,12 @@ export class AgentOrchestrator implements vscode.Disposable {
             }
         }
 
-        // Delete CLAUDE.md files created so far
-        for (const mdPath of createdClaudeMdPaths) {
+        // Delete instruction files created so far
+        for (const mdPath of createdInstructionPaths) {
             try {
-                if (fs.existsSync(mdPath)) {
-                    fs.unlinkSync(mdPath);
-                }
+                fs.rmSync(mdPath, { force: true });
             } catch (err) {
-                logError(`Failed to delete CLAUDE.md at ${mdPath}`, err);
+                logError(`Failed to delete agent instructions at ${mdPath}`, err);
             }
         }
 
@@ -727,8 +731,9 @@ export class AgentOrchestrator implements vscode.Disposable {
             const dir = path.dirname(this.teamsFilePath);
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
-                ensureGroveDirIgnored(this.repoRoot);
             }
+            // Also covers a .grove/ that an earlier version created.
+            excludeGroveDir(this.repoRoot);
 
             const data: PersistedTeam[] = [...this.teams.values()].map(
                 (t) => ({

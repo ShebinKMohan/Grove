@@ -9,6 +9,12 @@ import * as path from "path";
 import * as os from "os";
 import { execFileSync } from "child_process";
 import { log } from "./logger";
+import {
+    buildPosixClaudeCommand,
+    buildPowerShellClaudeCommand,
+    firstCommandPath,
+    INLINE_PROMPT_LIMIT_BYTES,
+} from "./claude-command";
 
 /** Cached absolute path to the claude binary. */
 let cachedClaudePath: string | undefined;
@@ -19,10 +25,12 @@ function resolveClaudePath(): string {
     if (!cachedClaudePath) {
         try {
             const cmd = process.platform === "win32" ? "where" : "which";
-            cachedClaudePath = execFileSync(cmd, ["claude"], {
+            const found = firstCommandPath(execFileSync(cmd, ["claude"], {
                 encoding: "utf-8",
                 timeout: 5000,
-            }).trim().split("\n")[0]; // `where` on Windows can return multiple lines
+            }));
+            if (!found) throw new Error("claude not found");
+            cachedClaudePath = found;
             claudeVerified = true;
         } catch {
             cachedClaudePath = "claude";
@@ -93,7 +101,11 @@ function hasExistingClaudeSession(cwd: string): boolean {
 export async function launchClaude(
     branchName: string,
     cwd: string,
-    options?: { skipSessionPrompt?: boolean }
+    options?: {
+        skipSessionPrompt?: boolean;
+        /** Agent instructions appended to Claude Code's system prompt. */
+        appendSystemPromptFile?: string;
+    }
 ): Promise<vscode.Terminal | undefined> {
     const claudePath = resolveClaudePath();
     let claudeArgs: string[] = [];
@@ -152,10 +164,19 @@ export async function launchClaude(
         }
     }
 
-    const quotedPath = claudePath.includes(" ")
-        ? `"${claudePath}"`
-        : claudePath;
-    const execCmd = [quotedPath, ...claudeArgs].join(" ");
+    const promptFile = options?.appendSystemPromptFile;
+    let promptBytes = 0;
+    try {
+        promptBytes = promptFile ? fs.statSync(promptFile).size : 0;
+    } catch {
+        log(`Agent instructions not found: ${promptFile}`);
+    }
+    const commandOptions = {
+        claudePath,
+        args: claudeArgs,
+        appendSystemPromptFile: promptFile,
+        readFileInClaude: promptBytes > INLINE_PROMPT_LIMIT_BYTES,
+    };
 
     const iconPath = new vscode.ThemeIcon("git-branch");
     let terminalOptions: vscode.TerminalOptions;
@@ -166,7 +187,7 @@ export async function launchClaude(
             name: `Claude: ${branchName}`,
             cwd,
             shellPath: "powershell.exe",
-            shellArgs: ["-NoProfile", "-Command", `& ${execCmd}`],
+            shellArgs: ["-NoProfile", "-Command", buildPowerShellClaudeCommand(commandOptions)],
             color: new vscode.ThemeColor("terminal.ansiGreen"),
             iconPath,
         };
@@ -182,7 +203,7 @@ export async function launchClaude(
         const shellCmd = [
             "sleep 2",
             drainCmd,
-            `exec ${execCmd}`,
+            `exec ${buildPosixClaudeCommand(commandOptions)}`,
         ].join("; ");
 
         terminalOptions = {

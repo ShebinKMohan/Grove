@@ -32,7 +32,12 @@ import {
     validateBranchName,
     fetchRemote,
     syncWorktree,
+    listUncommittedChanges,
 } from "./core/worktree-manager";
+import {
+    agentInstructionsPath,
+    isGroveGeneratedInstructions,
+} from "./core/claude-md-generator";
 import { openTerminal, openInNewWindow, launchClaude } from "./utils/terminal";
 import { DashboardPanel } from "./ui/webview/dashboard-panel";
 import {
@@ -44,11 +49,27 @@ import {
     detectTestCommand,
     postMergeCleanup,
     formatMergeReportMarkdown,
+    autoCommitWorktree,
+    defaultExclusionReason,
+    findBranchesWithGeneratedClaudeMd,
+    findConflictMarkers,
+    isNestedRepo,
+    listUnmergedFiles,
+    stageResolvedConflicts,
 } from "./core/merge-sequencer";
 import { formatErrorForUser } from "./utils/errors";
 import { log, logError, disposeLogger } from "./utils/logger";
 
 /** Read the user-configured protected branches list from VS Code settings. */
+/** True if the file exists and is agent instructions Grove generated. */
+function isGeneratedFile(filePath: string): boolean {
+    try {
+        return isGroveGeneratedInstructions(fs.readFileSync(filePath, "utf-8"));
+    } catch {
+        return false;
+    }
+}
+
 function getProtectedBranches(): string[] {
     const config = vscode.workspace.getConfiguration("grove");
     return config.get<string[]>("protectedBranches", ["main", "master", "develop", "production"]);
@@ -762,7 +783,9 @@ async function activateWithRepo(
                         wt.statusSummary !== "missing"
                     ) {
                         const confirm = await vscode.window.showWarningMessage(
-                            `Worktree '${wt.branch}' has uncommitted changes. Delete anyway?`,
+                            `Worktree '${wt.branch}' has uncommitted changes. Delete anyway?\n\n` +
+                            `This deletes the worktree with its uncommitted and untracked files, ` +
+                            `and its local branch unless the branch is protected.`,
                             { modal: true },
                             "Force Delete"
                         );
@@ -918,6 +941,9 @@ async function activateWithRepo(
                                 await removeWorktree(repoRoot, wt.path, {
                                     deleteBranch: deleteBranches,
                                     force,
+                                    // Force covers uncommitted files only; a branch
+                                    // with unmerged commits is kept.
+                                    forceDeleteBranch: false,
                                     protectedBranches: getProtectedBranches(),
                                 });
 
@@ -999,7 +1025,11 @@ async function activateWithRepo(
 
         const task = taskDescription ?? "";
 
-        const terminal = await launchClaude(branch, worktreePath);
+        // A team agent's instructions live in .grove/agents/; relaunches keep them.
+        const instructions = agentInstructionsPath(repoRoot, worktreePath);
+        const terminal = await launchClaude(branch, worktreePath, {
+            appendSystemPromptFile: fs.existsSync(instructions) ? instructions : undefined,
+        });
         if (terminal) {
             sessionTracker.startSession(
                 terminal,
@@ -1350,8 +1380,8 @@ async function activateWithRepo(
                     const templateList = listTemplateNames(repoRoot, templateDir);
                     if (templateList.length === 0) {
                         void showAutoWarning(
-                            "No team templates found. Create one with " +
-                            "'Grove: Create Team Template'."
+                            "No team templates found. Add a template JSON file to the " +
+                            "template directory (grove.templateDirectory, default .grove/templates)."
                         );
                         return;
                     }
@@ -1565,8 +1595,41 @@ async function activateWithRepo(
                 const teamId = item?.team?.id;
                 if (!teamId) return;
 
+                // Say which worktrees still hold work that would be deleted:
+                // uncommitted files, and commits not merged into the base branch.
+                const defaultBase = vscode.workspace
+                    .getConfiguration("grove")
+                    .get<string>("defaultBaseBranch", "main");
+                const atRisk: string[] = [];
+                for (const agent of orchestrator.getTeam(teamId)?.agents ?? []) {
+                    if (!agent.worktreePath || !fs.existsSync(agent.worktreePath)) continue;
+                    const parts: string[] = [];
+                    try {
+                        const changes = await listUncommittedChanges(agent.worktreePath);
+                        const count = changes.tracked.length + changes.untracked.length;
+                        if (count > 0) parts.push(`${count} uncommitted file(s)`);
+                    } catch {
+                        parts.push("status unknown");
+                    }
+                    if (agent.branch) {
+                        try {
+                            const ahead = Number(await git(
+                                ["rev-list", "--count", `refs/heads/${defaultBase}..refs/heads/${agent.branch}`],
+                                repoRoot
+                            ));
+                            if (ahead > 0) parts.push(`${ahead} commit(s) not merged into ${defaultBase}`);
+                        } catch {
+                            // Base or branch missing; nothing to compare
+                        }
+                    }
+                    if (parts.length > 0) atRisk.push(`${agent.branch}: ${parts.join(", ")}`);
+                }
+
                 const confirm = await vscode.window.showWarningMessage(
-                    `Delete all worktrees for team "${item.team?.name}"? This cannot be undone.`,
+                    `Delete all worktrees and branches for team "${item.team?.name}"? This cannot be undone.` +
+                    (atRisk.length > 0
+                        ? `\n\nThis work will be deleted:\n${atRisk.join("\n")}`
+                        : ""),
                     { modal: true },
                     "Delete Worktrees"
                 );
@@ -1850,6 +1913,17 @@ async function activateWithRepo(
                     );
                     if (!picks || picks.length === 0) return;
 
+                    // A worktree whose folder was deleted cannot be committed or merged.
+                    const missing = picks.filter((p) => !fs.existsSync(p.worktree.path));
+                    if (missing.length > 0) {
+                        void showAutoWarning(
+                            `Skipping ${missing.length} worktree(s) whose folder no longer exists: ` +
+                            missing.map((m) => m.worktree.branch).join(", ")
+                        );
+                        for (const m of missing) picks.splice(picks.indexOf(m), 1);
+                        if (picks.length === 0) return;
+                    }
+
                     const total = picks.length;
 
                     // Auto-detect test command (no dialog — just run if found)
@@ -1892,6 +1966,37 @@ async function activateWithRepo(
                         if (proceed !== "Merge Anyway") return;
                     }
 
+                    // Branches that already carry a CLAUDE.md generated by Grove 0.6.0
+                    // or earlier would put it on the target. Checked before any session
+                    // is stopped; it only reads committed history.
+                    const generatedClaudeMd = await findBranchesWithGeneratedClaudeMd(
+                        repoRoot,
+                        picks.map((p) => p.worktree.branch),
+                        baseBranch
+                    );
+                    if (generatedClaudeMd.branches.length > 0) {
+                        const effect = generatedClaudeMd.baseHasClaudeMd
+                            ? `Merging them replaces the project's CLAUDE.md on ${baseBranch}. To keep it, cancel, ` +
+                              `run 'git checkout ${baseBranch} -- CLAUDE.md' in each of these worktrees, commit, and merge again.`
+                            : `${baseBranch} has no CLAUDE.md, so merging them adds Grove's agent file there as the project's CLAUDE.md. ` +
+                              `To avoid that, cancel, run 'git rm CLAUDE.md' in each of these worktrees, commit, and merge again.`;
+                        const choice = await vscode.window.showWarningMessage(
+                            `These branches carry a CLAUDE.md that an earlier version of Grove generated and committed:\n\n` +
+                            `${generatedClaudeMd.branches.join("\n")}\n\n${effect}`,
+                            { modal: true },
+                            "Merge Anyway"
+                        );
+                        if (choice !== "Merge Anyway") return;
+                    }
+
+                    let sessionsStopped = false;
+                    const cancelAfterStop = (): void => {
+                        if (sessionsStopped) {
+                            void showAutoInfo("Merge cancelled. The stopped sessions can be relaunched from the sidebar.");
+                        }
+                        refreshAll();
+                    };
+
                     // ── Stop active sessions in merge targets ──
                     const worktreePathsToMerge = picks.map((p) => p.worktree.path);
                     const activeSessionsInMerge = sessionTracker
@@ -1908,6 +2013,7 @@ async function activateWithRepo(
                         for (const session of activeSessionsInMerge) {
                             sessionTracker.stopSession(session.id);
                         }
+                        sessionsStopped = true;
                     }
 
                     // Sort picks by recommended merge order from the report
@@ -1931,23 +2037,73 @@ async function activateWithRepo(
                         return;
                     }
 
-                    // Auto-commit uncommitted changes in worktrees
+                    // New files the agents created are untracked. Ask which ones to
+                    // commit and merge; unchecked files stay in their worktree. Nothing
+                    // is changed until the user confirms.
+                    const untrackedItems: Array<vscode.QuickPickItem & { worktreePath: string; file: string }> = [];
                     for (const pick of picks) {
-                        try {
-                            const status = await git(["status", "--porcelain"], pick.worktree.path);
-                            if (status.trim().length > 0) {
-                                await gitWrite(["add", "-u"], pick.worktree.path);
-                                const staged = await git(["diff", "--cached", "--name-only"], pick.worktree.path);
-                                if (staged.trim().length > 0) {
-                                    await gitWrite(["commit", "-m", "Grove: auto-commit agent changes"], pick.worktree.path);
-                                }
-                            }
-                        } catch (err) {
-                            logError(`Failed to auto-commit in ${pick.worktree.branch}`, err);
+                        const { untracked } = await listUncommittedChanges(pick.worktree.path);
+                        for (const file of untracked) {
+                            // A CLAUDE.md that 0.6.0 generated is undone by the auto-commit.
+                            if (file === "CLAUDE.md" && isGeneratedFile(path.join(pick.worktree.path, file))) continue;
+                            // Nested repositories are never merged; cleanup asks about them.
+                            if (isNestedRepo(file)) continue;
+                            const reason = defaultExclusionReason(file);
+                            untrackedItems.push({
+                                label: file,
+                                description: reason
+                                    ? `${pick.worktree.branch} \u00b7 ${reason}`
+                                    : pick.worktree.branch,
+                                picked: !reason,
+                                worktreePath: pick.worktree.path,
+                                file,
+                            });
                         }
                     }
 
-                    const preMergeHash = (await git(["rev-parse", "HEAD"], repoRoot)).trim();
+                    const includeUntracked = new Map<string, string[]>();
+                    if (untrackedItems.length > 0) {
+                        const chosen = await vscode.window.showQuickPick(untrackedItems, {
+                            canPickMany: true,
+                            ignoreFocusOut: true,
+                            title: `Grove: ${untrackedItems.length} new file(s) are not committed in the worktrees`,
+                            placeHolder: "Checked files are committed and merged. Unchecked files stay in their worktree.",
+                        });
+                        if (!chosen) {
+                            cancelAfterStop();
+                            return;
+                        }
+                        for (const item of chosen) {
+                            const files = includeUntracked.get(item.worktreePath) ?? [];
+                            files.push(item.file);
+                            includeUntracked.set(item.worktreePath, files);
+                        }
+                    }
+
+                    // Auto-commit each worktree's tracked changes plus the chosen new files
+                    for (const pick of picks) {
+                        try {
+                            await autoCommitWorktree(
+                                pick.worktree.path,
+                                includeUntracked.get(pick.worktree.path) ?? []
+                            );
+                        } catch (err) {
+                            logError(`Failed to auto-commit in ${pick.worktree.branch}`, err);
+                            void showAutoError(
+                                formatErrorForUser(
+                                    err,
+                                    `Could not commit the changes in ${pick.worktree.branch}, so nothing was merged`
+                                )
+                            );
+                            return;
+                        }
+                    }
+
+                    // The target branch's tip before any merge: the undo hint must point
+                    // at the target, not at whatever the main checkout had open.
+                    const preMergeHash = (
+                        await git(["rev-parse", "--verify", `refs/heads/${baseBranch}^{commit}`], repoRoot)
+                    ).trim();
                     const mergedBranches: string[] = [];
                     const results: Array<{ branch: string; status: string; message: string }> = [];
 
@@ -1982,27 +2138,59 @@ async function activateWithRepo(
                                         }
                                     }
 
-                                    const action = await vscode.window.showWarningMessage(
-                                        `Conflict in ${branch}: ${step.conflictFiles?.join(", ") ?? "unknown files"}\n\nResolve the conflicts in the editor, save, then continue.`,
-                                        { modal: true },
-                                        "I've Resolved \u2014 Continue",
-                                        "Skip This Branch",
-                                        "Abort All"
-                                    );
+                                    let action: string | undefined;
+                                    for (;;) {
+                                        // Not modal: a modal dialog blocks the editor, and the
+                                        // user has to edit the files before continuing.
+                                        action = await vscode.window.showWarningMessage(
+                                            `Conflict in ${branch}: ${step.conflictFiles?.join(", ") ?? "unknown files"}. ` +
+                                            `Resolve the conflicts in the editor and save, then choose Continue.`,
+                                            "I've Resolved \u2014 Continue",
+                                            "Skip This Branch",
+                                            "Abort All"
+                                        );
+                                        if (action !== "I've Resolved \u2014 Continue") break;
+
+                                        const withMarkers = findConflictMarkers(repoRoot, step.conflictFiles ?? []);
+                                        if (withMarkers.length === 0) break;
+                                        const commitAnyway = await vscode.window.showWarningMessage(
+                                            `These files still contain conflict markers (<<<<<<< and >>>>>>>):\n\n${withMarkers.join("\n")}\n\nCommit them as they are?`,
+                                            { modal: true },
+                                            "Commit Anyway"
+                                        );
+                                        if (commitAnyway === "Commit Anyway") break;
+                                    }
 
                                     if (action === "I've Resolved \u2014 Continue") {
-                                        // Stage resolved files and commit
+                                        // Stage only the conflicted files, then commit the merge
                                         try {
-                                            await gitWrite(["add", "."], repoRoot);
+                                            const stillUnmerged = await stageResolvedConflicts(
+                                                repoRoot,
+                                                step.conflictFiles ?? []
+                                            );
+                                            if (stillUnmerged.length > 0) {
+                                                throw new Error(`Still unmerged: ${stillUnmerged.join(", ")}`);
+                                            }
                                             await gitWrite(["commit", "--no-edit"], repoRoot);
                                             mergedBranches.push(branch);
                                             results.push({ branch, status: "resolved", message: "Conflicts resolved" });
-                                        } catch {
+                                        } catch (err) {
                                             const postState = await checkRepoState(repoRoot);
                                             if (!postState.clean) {
-                                                try { await abortMerge(repoRoot); } catch { /* */ }
-                                                results.push({ branch, status: "aborted", message: "Conflicts not fully resolved" });
-                                                void showAutoWarning(`Conflicts in ${branch} were not fully resolved. Merge aborted for this branch.`);
+                                                // Leave the merge in progress: aborting would throw
+                                                // away the user's resolutions.
+                                                const unmerged = await listUnmergedFiles(repoRoot).catch(() => []);
+                                                const state = unmerged.length > 0
+                                                    ? `These files are still unmerged: ${unmerged.join(", ")}. Resolve them, then finish with 'git commit'`
+                                                    : `Your resolutions are staged. Finish it with 'git commit'`;
+                                                results.push({ branch, status: "error", message: "Merge commit failed" });
+                                                await vscode.window.showWarningMessage(
+                                                    `Could not commit the merge of ${branch}: ${err instanceof Error ? err.message : String(err)}\n\n` +
+                                                    `The merge is still in progress. ${state}, or undo it with 'git merge --abort'. ` +
+                                                    `The merge sequence has stopped.`,
+                                                    { modal: true }
+                                                );
+                                                break;
                                             } else {
                                                 mergedBranches.push(branch);
                                                 results.push({ branch, status: "resolved", message: "Conflicts resolved" });
@@ -2016,10 +2204,19 @@ async function activateWithRepo(
                                             15_000
                                         );
                                         break;
-                                    } else {
+                                    } else if (action === "Skip This Branch") {
                                         try { await abortMerge(repoRoot); } catch { /* */ }
                                         results.push({ branch, status: "skipped", message: "Skipped (conflict)" });
                                         continue;
+                                    } else {
+                                        // Dismissed without a choice: stop, but undo nothing.
+                                        results.push({ branch, status: "error", message: "Stopped with the merge in progress" });
+                                        await vscode.window.showWarningMessage(
+                                            `The merge sequence has stopped. The merge of ${branch} is still in progress: ` +
+                                            `resolve the conflicts and finish it with 'git commit', or undo it with 'git merge --abort'.`,
+                                            { modal: true }
+                                        );
+                                        break;
                                     }
                                 } else if (step.status === "error") {
                                     try { await abortMerge(repoRoot); } catch { /* */ }
@@ -2092,14 +2289,39 @@ async function activateWithRepo(
                             const mergedPicks = picks.filter((_, i) =>
                                 results[i]?.status === "merged" || results[i]?.status === "resolved"
                             );
-                            await postMergeCleanup(
+                            const cleanup = await postMergeCleanup(
                                 repoRoot,
                                 mergedPicks.map((p) => ({
                                     path: p.worktree.path,
                                     branch: p.worktree.branch,
                                 })),
-                                { protectedBranches: getProtectedBranches() }
+                                {
+                                    protectedBranches: getProtectedBranches(),
+                                    confirmDiscard: async (wt, files) => {
+                                        const shown = files.slice(0, 10).join("\n") +
+                                            (files.length > 10 ? `\nand ${files.length - 10} more` : "");
+                                        const choice = await vscode.window.showWarningMessage(
+                                            `Worktree '${wt.branch}' still has ${files.length} file(s) that were not committed or merged:\n\n` +
+                                            `${shown}\n\nRemoving the worktree deletes them.`,
+                                            { modal: true },
+                                            "Delete Them"
+                                        );
+                                        return choice === "Delete Them";
+                                    },
+                                }
                             );
+                            const summary = [`Cleaned up ${cleanup.removed} worktree(s).`];
+                            if (cleanup.kept.length > 0) {
+                                summary.push(`Kept ${cleanup.kept.length} with files that were not merged: ${cleanup.kept.join(", ")}.`);
+                            }
+                            if (cleanup.errors.length > 0) {
+                                summary.push(`Failed: ${cleanup.errors.join("; ")}`);
+                            }
+                            if (cleanup.kept.length > 0 || cleanup.errors.length > 0) {
+                                void showAutoWarning(summary.join(" "));
+                            } else {
+                                void showAutoInfo(summary.join(" "));
+                            }
                         }
                     } else {
                         void showAutoInfo(`No branches were merged into ${baseBranch}.`);
