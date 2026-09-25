@@ -1822,7 +1822,8 @@ async function activateWithRepo(
                         async () =>
                             generateMergeReport(
                                 picks.map((p) => p.worktree.path),
-                                baseBranch
+                                baseBranch,
+                                repoRoot
                             )
                     );
 
@@ -1839,9 +1840,9 @@ async function activateWithRepo(
 
                     // Summary notification
                     const overlapCount = report.overlaps.length;
-                    const conflictCount = report.conflictPredictions.reduce(
-                        (sum, p) => sum + p.conflictFiles.length, 0
-                    );
+                    const conflictCount = new Set(
+                        report.conflictPredictions.flatMap((p) => p.conflictFiles)
+                    ).size;
                     const baseOverlapCount = report.conflictPredictions.reduce(
                         (sum, p) => sum + p.baseOverlapFiles.length, 0
                     );
@@ -1849,7 +1850,7 @@ async function activateWithRepo(
                     if (conflictCount > 0) {
                         void showAutoWarning(
                             `Merge report ready. Merging in the recommended order into ${baseBranch}, git reports ` +
-                            `${conflictCount} conflicting file(s). Only committed work is checked.`
+                            `conflicts in ${conflictCount} file(s). Only committed work is checked.`
                         );
                     } else if (baseOverlapCount > 0) {
                         void showAutoWarning(
@@ -2097,32 +2098,43 @@ async function activateWithRepo(
                             title: "Checking for conflicts...",
                             cancellable: false,
                         },
-                        () => generateMergeReport(picks.map((p) => p.worktree.path), baseBranch)
+                        () => generateMergeReport(picks.map((p) => p.worktree.path), baseBranch, repoRoot)
                     );
 
                     // Merge in the report's order (types/models first → core/utils →
                     // API → UI → tests), which is the order the prediction used.
                     if (report.mergeOrder.length > 0) {
+                        // Keyed by worktree path: the report and the picks name
+                        // branches from different sources.
                         const orderMap = new Map<string, number>();
-                        report.mergeOrder.forEach((entry, idx) => orderMap.set(entry.branch, idx));
+                        report.mergeOrder.forEach((entry, idx) => orderMap.set(entry.worktreePath, idx));
                         picks.sort((a, b) => {
-                            const sa = orderMap.get(a.worktree.branch) ?? 999;
-                            const sb = orderMap.get(b.worktree.branch) ?? 999;
+                            const sa = orderMap.get(a.worktree.path) ?? 999;
+                            const sb = orderMap.get(b.worktree.path) ?? 999;
                             return sa - sb;
                         });
                     }
 
+                    if (report.conflictCheck === "unavailable") {
+                        void showAutoWarning(
+                            "The conflict check could not run (git merge-tree needs Git 2.38 or later), " +
+                            "so conflicts will only show up during the merge.",
+                            12_000
+                        );
+                    }
                     const predictedConflicts = report.conflictPredictions.filter(
-                        (p) => p.conflictFiles.length > 0
+                        (p) => p.conflictFiles.length > 0 || p.checkFailed
                     );
                     if (predictedConflicts.length > 0) {
                         const conflictDetails = predictedConflicts.map((p) =>
-                            `${p.branch}: ${p.conflictFiles.join(", ")}` +
-                            (p.conflictsWith.length > 0 ? ` (with ${p.conflictsWith.join(", ")})` : "")
+                            p.checkFailed
+                                ? `${p.branch}: could not be checked (${p.checkFailed})`
+                                : `${p.branch}: ${p.conflictFiles.join(", ")}` +
+                                  (p.conflictsWith.length > 0 ? ` (also changed by ${p.conflictsWith.join(", ")})` : "")
                         ).join("\n");
                         const proceed = await vscode.window.showWarningMessage(
-                            `Merging in this order into ${baseBranch}, git reports conflicts:\n\n${conflictDetails}\n\n` +
-                            `Merge anyway and resolve them when they come up?`,
+                            `Merging in this order into ${baseBranch}, git reports:\n\n${conflictDetails}\n\n` +
+                            `Merge anyway and resolve conflicts when they come up?`,
                             { modal: true },
                             "Merge Anyway",
                             "View Report"

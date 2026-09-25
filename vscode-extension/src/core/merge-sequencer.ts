@@ -105,6 +105,8 @@ export interface ConflictPrediction {
     baseOverlapFiles: string[];
     /** "merge-tree" when git merged in memory; "file-overlap" if it could not */
     method: "merge-tree" | "file-overlap";
+    /** Set when git could not check this branch, with git's reason */
+    checkFailed?: string;
 }
 
 export interface MergeReport {
@@ -116,8 +118,10 @@ export interface MergeReport {
     worktrees: WorktreeMergeInfo[];
     /** Files modified in multiple worktrees */
     overlaps: FileOverlapInfo[];
-    /** Predicted merge conflicts against the base branch */
+    /** Predicted merge conflicts along the recommended merge order */
     conflictPredictions: ConflictPrediction[];
+    /** Whether the in-memory merge check ran ("unavailable": Git older than 2.38) */
+    conflictCheck: "merge-tree" | "unavailable";
     /** Recommended merge order */
     mergeOrder: MergeOrderEntry[];
     /** Total files changed across all worktrees */
@@ -157,25 +161,27 @@ interface MergeStep {
 // ────────────────────────────────────────────
 
 /** Result of merging two commits in memory with `git merge-tree`. */
-interface MergeTreeResult {
-    /** Tree of the merged result (with conflict markers where git conflicted). */
-    tree: string;
-    /** Paths git reports as conflicted; empty for a clean merge. */
-    conflictFiles: string[];
-}
+type MergeTreeResult =
+    /** Git merged the two; `conflictFiles` is empty for a clean merge. */
+    | { kind: "merged"; tree: string; conflictFiles: string[] }
+    /** This Git cannot run the check at all (older than 2.38). */
+    | { kind: "unsupported" }
+    /** Git refused this pair (for example unrelated histories). */
+    | { kind: "failed"; reason: string };
 
 /**
  * Merge two commits in memory with `git merge-tree --write-tree` (Git 2.38+).
  * The working tree, index and refs are untouched; git only writes objects.
- * Returns undefined when merge-tree cannot answer (Git older than 2.38,
- * unrelated histories, a missing branch).
+ * Run it in the checkout where the real merge will happen: git reads merge
+ * attributes and submodules from that working tree.
  */
 async function mergeTree(
     repoRoot: string,
     ours: string,
     theirs: string
-): Promise<MergeTreeResult | undefined> {
+): Promise<MergeTreeResult> {
     let stdout: string;
+    let unclean = false;
     try {
         stdout = await git(
             ["merge-tree", "--write-tree", "--name-only", "-z", ours, theirs],
@@ -183,35 +189,97 @@ async function mergeTree(
             { trim: false }
         );
     } catch (err) {
-        // Exit code 1 means the merge has conflicts; the result is on stdout.
-        if (err instanceof GitError && err.exitCode === 1) {
+        if (!(err instanceof GitError)) return { kind: "failed", reason: String(err) };
+        // Exit code 1 means the merge is not clean; the result is on stdout.
+        if (err.exitCode === 1) {
             stdout = err.stdout;
+            unclean = true;
+        } else if (err.exitCode === 129 || /unknown option|usage: git merge-tree/i.test(err.message)) {
+            return { kind: "unsupported" };
         } else {
-            return undefined;
+            return { kind: "failed", reason: err.message };
         }
     }
-    // -z output: <tree>\0<conflicted path>\0...\0\0<messages>
+
+    // -z output: <tree>\0<conflicted path>\0...\0\0<messages>, where each
+    // message is <count>\0<path>...\0<type>\0<text>\0.
     const fields = stdout.split("\0");
     const conflictFiles: string[] = [];
-    for (let i = 1; i < fields.length && fields[i] !== ""; i++) {
+    let i = 1;
+    for (; i < fields.length && fields[i] !== ""; i++) {
         conflictFiles.push(fields[i]);
     }
-    return { tree: fields[0].trim(), conflictFiles: [...new Set(conflictFiles)] };
+    if (unclean && conflictFiles.length === 0) {
+        // Some conflicts (for example a directory rename split) list no
+        // conflicted path; take the paths from the CONFLICT messages.
+        for (i += 1; i < fields.length; ) {
+            const count = Number(fields[i]);
+            if (!Number.isInteger(count) || count < 0) break;
+            const paths = fields.slice(i + 1, i + 1 + count);
+            const type = fields[i + 1 + count] ?? "";
+            if (type.startsWith("CONFLICT")) conflictFiles.push(...(paths.length > 0 ? paths : [type]));
+            i += count + 3;
+        }
+        if (conflictFiles.length === 0) conflictFiles.push("(unlisted conflict)");
+    }
+    return { kind: "merged", tree: fields[0].trim(), conflictFiles: [...new Set(conflictFiles)] };
 }
 
-/** Files changed on `ref` since it diverged from `base`. */
+interface ChangedPaths {
+    /** Every path changed, including both the old and new path of a rename. */
+    paths: Set<string>;
+    /** New path -> old path, for renames and copies. */
+    renamedFrom: Map<string, string>;
+}
+
+/** Paths changed on `ref` since it diverged from `base`. */
 async function changedSinceMergeBase(
     repoRoot: string,
     base: string,
     ref: string
-): Promise<Set<string>> {
+): Promise<ChangedPaths> {
     try {
         const mergeBase = (await git(["merge-base", base, ref], repoRoot)).trim();
-        const raw = await git(["diff", "--name-only", "-z", mergeBase, ref], repoRoot, { trim: false });
-        return new Set(raw.split("\0").filter(Boolean));
-    } catch {
-        return new Set();
+        const raw = await git(
+            ["diff", "--name-status", "-M", "-z", mergeBase, ref, "--"],
+            repoRoot,
+            { trim: false }
+        );
+        // -z name-status: <status>\0<path>\0, or <R|C score>\0<old>\0<new>\0
+        const fields = raw.split("\0");
+        const paths = new Set<string>();
+        const renamedFrom = new Map<string, string>();
+        for (let i = 0; i < fields.length - 1; ) {
+            const status = fields[i];
+            if (!status) break;
+            if (/^[RC]/.test(status)) {
+                const [from, to] = [fields[i + 1], fields[i + 2]];
+                paths.add(from);
+                paths.add(to);
+                renamedFrom.set(to, from);
+                i += 3;
+            } else {
+                paths.add(fields[i + 1]);
+                i += 2;
+            }
+        }
+        return { paths, renamedFrom };
+    } catch (err) {
+        logError(`Could not list changes on ${ref}`, err);
+        return { paths: new Set(), renamedFrom: new Map() };
     }
+}
+
+/** Resolve a local branch (preferred) or any revision to a commit id. */
+async function resolveCommit(repoRoot: string, name: string): Promise<string | undefined> {
+    for (const rev of [`refs/heads/${name}^{commit}`, `${name}^{commit}`]) {
+        try {
+            return (await git(["rev-parse", "--verify", "--quiet", rev], repoRoot)).trim();
+        } catch {
+            // Try the next form
+        }
+    }
+    return undefined;
 }
 
 export interface SequencePrediction {
@@ -220,6 +288,8 @@ export interface SequencePrediction {
     conflictFiles: string[];
     /** Earlier branches (and the base branch) that also changed those paths. */
     conflictsWith: string[];
+    /** Set when git could not check this branch (it is left out of later steps). */
+    checkFailed?: string;
 }
 
 /**
@@ -231,36 +301,36 @@ export interface SequencePrediction {
  * that merged cleanly (each clean step is recorded with `git commit-tree`,
  * which writes an unreferenced commit object). This catches two branches
  * that change the same lines even when the base has not moved. A branch
- * predicted to conflict is left out of the simulated result, because its
- * final content depends on how the conflict is resolved.
+ * predicted to conflict, or one git cannot check, is left out of the
+ * simulated result, because its final content is unknown.
  *
- * Returns undefined when `git merge-tree` cannot answer (Git older than
- * 2.38, unrelated histories), so callers can fall back to file-level checks.
+ * Returns undefined when this Git cannot run `git merge-tree --write-tree`
+ * (older than 2.38) or the base branch does not resolve, so callers can
+ * fall back to file-level checks.
  */
 export async function predictMergeSequence(
     repoRoot: string,
     branches: string[],
     baseBranch: string
 ): Promise<SequencePrediction[] | undefined> {
-    let current: string;
-    try {
-        current = (await git(["rev-parse", "--verify", `${baseBranch}^{commit}`], repoRoot)).trim();
-    } catch {
-        return undefined;
-    }
+    let current = await resolveCommit(repoRoot, baseBranch);
+    if (!current) return undefined;
 
     const merged: string[] = [];
     const predictions: SequencePrediction[] = [];
     for (const branch of branches) {
-        let tip: string;
-        try {
-            tip = (await git(["rev-parse", "--verify", `${branch}^{commit}`], repoRoot)).trim();
-        } catch {
-            return undefined;
+        const tip = await resolveCommit(repoRoot, branch);
+        if (!tip) {
+            predictions.push({ branch, conflictFiles: [], conflictsWith: [], checkFailed: "branch not found" });
+            continue;
         }
 
         const result = await mergeTree(repoRoot, current, tip);
-        if (!result) return undefined;
+        if (result.kind === "unsupported") return undefined;
+        if (result.kind === "failed") {
+            predictions.push({ branch, conflictFiles: [], conflictsWith: [], checkFailed: result.reason });
+            continue;
+        }
 
         if (result.conflictFiles.length === 0) {
             current = (
@@ -280,13 +350,30 @@ export async function predictMergeSequence(
             continue;
         }
 
-        // Name who else changed the conflicting files: the base since this
-        // branch diverged, and the earlier branches in the simulated result.
-        const conflicting = new Set(result.conflictFiles);
-        const touches = (files: Set<string>): boolean =>
-            [...conflicting].some((file) => files.has(file));
+        // A path git moves aside is named <path>~<side>; the real merge names
+        // the sides HEAD and the branch, merge-tree used commit ids.
+        const oursId = current;
+        const conflictFiles = result.conflictFiles.map((file) =>
+            file.endsWith(`~${oursId}`) ? `${file.slice(0, -oursId.length)}HEAD`
+                : file.endsWith(`~${tip}`) ? `${file.slice(0, -tip.length)}${branch}`
+                : file
+        );
+
+        // Name who else changed the conflicting files (following renames):
+        // the base since this branch diverged, and the earlier merged branches.
+        const own = await changedSinceMergeBase(repoRoot, baseBranch, branch);
+        const conflicting = new Set<string>();
+        for (const file of result.conflictFiles) {
+            const plain = file.replace(/~[0-9a-f]{40,64}$/, "");
+            conflicting.add(plain);
+            // Also match under the path this branch renamed the file from.
+            const from = own.renamedFrom.get(plain);
+            if (from) conflicting.add(from);
+        }
+        const touches = (changed: ChangedPaths): boolean =>
+            [...changed.paths].some((file) => conflicting.has(file));
         const conflictsWith: string[] = [];
-        if (touches(await changedSinceMergeBase(repoRoot, tip, baseBranch))) {
+        if (touches(await changedSinceMergeBase(repoRoot, branch, baseBranch))) {
             conflictsWith.push(baseBranch);
         }
         for (const earlier of merged) {
@@ -294,9 +381,21 @@ export async function predictMergeSequence(
                 conflictsWith.push(earlier);
             }
         }
-        predictions.push({ branch, conflictFiles: result.conflictFiles, conflictsWith });
+        predictions.push({ branch, conflictFiles, conflictsWith });
     }
     return predictions;
+}
+
+/** The main checkout of the repository a worktree belongs to. */
+async function findMainCheckout(worktreePath: string): Promise<string> {
+    try {
+        const list = await git(["worktree", "list", "--porcelain"], worktreePath);
+        const first = list.split("\n").find((line) => line.startsWith("worktree "));
+        if (first) return first.slice("worktree ".length);
+    } catch {
+        // Fall through
+    }
+    return worktreePath;
 }
 
 /**
@@ -351,7 +450,9 @@ async function getBaseOverlapFiles(
  */
 export async function generateMergeReport(
     worktreePaths: string[],
-    baseBranch: string = "main"
+    baseBranch: string = "main",
+    /** The main checkout, where the merges run; found from the worktrees if omitted. */
+    mainCheckout?: string
 ): Promise<MergeReport> {
     const worktreeInfos: WorktreeMergeInfo[] = [];
     const allChangedFiles = new Map<string, string[]>(); // file → branches
@@ -386,17 +487,14 @@ export async function generateMergeReport(
     // Predict conflicts along that order: each branch against the base plus
     // the branches merged before it (see predictMergeSequence).
     const conflictPredictions: ConflictPrediction[] = [];
+    let conflictCheck: MergeReport["conflictCheck"] = "merge-tree";
     if (worktreePaths.length > 0) {
-        let repoRoot: string;
-        try {
-            const { getRepoRoot } = await import("../utils/git");
-            repoRoot = await getRepoRoot(worktreePaths[0]);
-        } catch {
-            repoRoot = path.resolve(worktreePaths[0], "..");
-        }
+        // Run in the main checkout, where the merges happen: git reads merge
+        // attributes and submodules from the working tree it runs in.
+        const repoRoot = mainCheckout ?? (await findMainCheckout(worktreePaths[0]));
 
         const ordered = mergeOrder
-            .map((entry) => worktreeInfos.find((w) => w.branch === entry.branch))
+            .map((entry) => worktreeInfos.find((w) => w.path === entry.worktreePath))
             .filter((w): w is WorktreeMergeInfo => w !== undefined && w.changedFiles.length > 0);
 
         let sequence: SequencePrediction[] | undefined;
@@ -409,6 +507,7 @@ export async function generateMergeReport(
         } catch (err) {
             logError("Failed to predict merge conflicts", err);
         }
+        if (!sequence) conflictCheck = "unavailable";
 
         for (const info of ordered) {
             const step = sequence?.find((p) => p.branch === info.branch);
@@ -418,9 +517,10 @@ export async function generateMergeReport(
                 conflictFiles: step?.conflictFiles ?? [],
                 conflictsWith: step?.conflictsWith ?? [],
                 baseOverlapFiles,
-                method: sequence ? "merge-tree" : "file-overlap",
+                method: sequence && !step?.checkFailed ? "merge-tree" : "file-overlap",
+                ...(step?.checkFailed ? { checkFailed: step.checkFailed } : {}),
             };
-            if (prediction.conflictFiles.length > 0 || baseOverlapFiles.length > 0) {
+            if (prediction.conflictFiles.length > 0 || baseOverlapFiles.length > 0 || prediction.checkFailed) {
                 conflictPredictions.push(prediction);
             }
         }
@@ -445,6 +545,7 @@ export async function generateMergeReport(
         worktrees: worktreeInfos,
         overlaps,
         conflictPredictions,
+        conflictCheck,
         mergeOrder,
         totalFilesChanged,
         totalLinesAdded,
@@ -1135,15 +1236,25 @@ export function formatMergeReportMarkdown(report: MergeReport): string {
     lines.push("");
 
     // Conflict predictions (most important — show first)
+    if (report.conflictCheck === "unavailable") {
+        lines.push(
+            "_The conflict check with `git merge-tree` could not run (it needs Git 2.38 or later), " +
+            "so only the file-level checks below ran._"
+        );
+        lines.push("");
+    }
+
     if (report.conflictPredictions.length > 0) {
         const hasExactConflicts = report.conflictPredictions.some(
             (p) => p.conflictFiles.length > 0
         );
-        if (report.conflictPredictions.some((p) => p.method === "file-overlap")) {
-            lines.push(
-                "_`git merge-tree` could not run (it needs Git 2.38 or later and branches with a shared history), " +
-                "so only the file-level checks below ran._"
-            );
+        const unchecked = report.conflictPredictions.filter((p) => p.checkFailed);
+        if (unchecked.length > 0) {
+            lines.push("**Not checked by `git merge-tree`:**");
+            lines.push("");
+            for (const pred of unchecked) {
+                lines.push(`- \`${pred.branch}\`: ${pred.checkFailed}`);
+            }
             lines.push("");
         }
 
@@ -1159,7 +1270,7 @@ export function formatMergeReportMarkdown(report: MergeReport): string {
 
             for (const pred of report.conflictPredictions) {
                 if (pred.conflictFiles.length === 0) continue;
-                const withWhom = pred.conflictsWith.length > 0 ? ` (with ${pred.conflictsWith.join(", ")})` : "";
+                const withWhom = pred.conflictsWith.length > 0 ? ` (also changed by ${pred.conflictsWith.join(", ")})` : "";
                 lines.push(`### \`${pred.branch}\` — ${pred.conflictFiles.length} conflicting file(s)${withWhom}`);
                 lines.push("");
                 for (const file of pred.conflictFiles) {

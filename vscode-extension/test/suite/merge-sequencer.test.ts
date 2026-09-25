@@ -137,6 +137,7 @@ describe("merge-sequencer", () => {
             totalLinesAdded: 230,
             totalLinesRemoved: 25,
             conflictPredictions: [],
+            conflictCheck: "merge-tree",
         };
 
         it("includes the report header", () => {

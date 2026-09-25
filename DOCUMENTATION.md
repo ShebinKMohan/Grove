@@ -720,7 +720,7 @@ For each worktree, computes:
 **Pre-Merge Check Against the Target Branch:**
 For each worktree branch with changes, the merge report compares it with the target branch you pick:
 - "Files Changed on Both Base & Branch" — files changed on both the target branch and the worktree branch since they diverged (a file-overlap heuristic). They may or may not conflict
-- "Predicted Merge Conflicts" — Grove merges the branches in memory with `git merge-tree --write-tree --name-only` (Git 2.38+) in the recommended merge order: each branch is merged with the target plus the branches before it that merge cleanly (each clean step is recorded with `git commit-tree` as an unreferenced commit, so no ref, index or file changes). The files git reports as conflicting are listed per branch, with the earlier branches or the target branch that also changed them. This catches two branches that change the same lines even when the target has not moved. A branch predicted to conflict is left out of the steps after it, because its result depends on how the conflict is resolved. Only committed work is checked. With Git older than 2.38, or unrelated histories, only the file-level checks run and the report says so
+- "Predicted Merge Conflicts" — Grove merges the branches in memory with `git merge-tree --write-tree --name-only` (Git 2.38+) in the recommended merge order: each branch is merged with the target plus the branches before it that merge cleanly (each clean step is recorded with `git commit-tree` as an unreferenced commit, so no ref, index or file changes). The files git reports as conflicting are listed per branch, with the earlier branches or the target branch that also changed them (renames are followed). This catches two branches that change the same lines even when the target has not moved. The check runs in the main checkout, so `.gitattributes` merge settings and submodules behave as in the real merge. A branch predicted to conflict is left out of the steps after it, because its result depends on how the conflict is resolved; a branch git cannot check (for example unrelated history) is listed as not checked and also left out. Only committed work is checked. With Git older than 2.38 the report and Execute Merge Sequence say the check could not run, and only the file-level checks run
 
 **Worktree-to-Worktree Overlap Analysis:**
 - Files modified in multiple worktrees identified
@@ -747,7 +747,7 @@ Branches are ordered by the paths of the files each one changed; a branch gets t
 4. Only if a branch already has a committed CLAUDE.md that Grove 0.6.0 generated: warning with "Merge Anyway" (otherwise the merge is cancelled)
 5. Only if the worktrees hold new (untracked) files: a checklist of those files (see Pre-Merge Auto-Commit)
 
-6. After the auto-commit, only if the conflict check finds conflicts: a warning listing them, with "Merge Anyway" / "View Report" (anything else cancels; nothing is merged and the worktrees keep their auto-commits)
+6. After the auto-commit, only if the conflict check finds conflicts or could not check a branch: a warning listing them, with "Merge Anyway" / "View Report" (anything else cancels; nothing is merged and the worktrees keep their auto-commits)
 
 **Pre-Merge Safety:**
 1. Stops active sessions in worktrees being merged (with confirmation)
