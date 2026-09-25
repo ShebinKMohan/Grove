@@ -8,14 +8,15 @@ Built for developers who run several [Claude Code](https://code.claude.com) agen
 
 ## What It Does
 
-- **Agent teams** — pick a template (Full-Stack, Code Review, Debug Squad, Migration, Rapid Prototype), describe the task, name the team, and confirm. Grove creates an isolated worktree per agent, writes each agent a CLAUDE.md listing the files it owns, and starts every Claude Code session so they run in parallel
+- **Agent teams** — pick a template (Full-Stack, Code Review, Debug Squad, Migration, Rapid Prototype), describe the task, name the team, and confirm. Grove creates a worktree per agent and writes each agent's role, task and the files it owns to `.grove/agents/`, outside every worktree, where git never sees it. It then opens a Claude Code session in each worktree with those instructions appended to the system prompt (`--append-system-prompt`). Your project's own CLAUDE.md is never overwritten. Each session waits for your first message before it starts work
 - **Base branch selection** — choose which branch to create worktrees from, with all local branches listed (default base branch first)
 - **Inline file browsing** — expand any worktree to see its changed files, compared against your configured base branch (`grove.defaultBaseBranch`, `main` by default). Click a file to open a visual side-by-side diff
 - **Smart sync indicator** — sync button appears when behind remote, so you know at a glance which branches need pulling. Background `git fetch` keeps counts up to date automatically
-- **Pre-merge conflict check** — before merging, the merge report lists files changed on both the base branch and the worktree branch since they diverged, so you can see where a merge is likely to need attention
-- **Overlap detection** — while two or more agent sessions are running, file watchers on those worktrees flag any file touched in more than one of them, ranked by severity (conflict / warning / info). Watching covers root level files and the common source directories (`src`, `lib`, `app`, `test`, `tests`, `pkg`, `cmd`, `internal`, `config`, `public`, `assets`, `scripts`)
-- **Merge sequencing** — pick a target branch from your local branches, and Grove merges the selected worktree branches in an infrastructure first order (types and models, then core and utils, then API, then UI, then tests), opens conflicting files with VS Code's inline conflict markers for you to resolve, runs your test command after each merge when one is configured or detected, and offers to push once the sequence finishes
-- **Clean `.gitignore` management** — worktree paths are auto-committed to `.gitignore` on creation and cleaned up on deletion, keeping your base branch always clean
+- **Pre-merge check** — before merging, the merge report lists files changed on both the base branch and the worktree branch since they diverged, so you can see where a merge is likely to need attention
+- **Overlap detection** — while two or more agent sessions are running, file watchers on those worktrees flag files touched in more than one of them. Each overlap gets a label from the file's name and path: `info` for shared config such as `package.json` or lockfiles, `warning` for paths containing `types` or `index.` and `.d.ts` files, and `conflict` for everything else. Grove does not compare the two versions' contents. Watching covers root level files and the common source directories (`src`, `lib`, `app`, `test`, `tests`, `pkg`, `cmd`, `internal`, `config`, `public`, `assets`, `scripts`)
+- **Merge sequencing** — pick a target branch from your local branches, and Grove merges the selected worktree branches in an infrastructure first order (types and models, then core and utils, then API, then UI, then tests). First it commits each worktree's uncommitted changes. New files the agents created are listed so you choose which ones to include; unchecked files stay in their worktree. It opens conflicting files with VS Code's inline conflict markers for you to resolve, and stages only those files when you continue. It runs your test command after each merge when one is configured or detected. If the tests fail you choose to continue or stop; stopping does not undo the merge just made. It offers to push once the sequence finishes
+- **Cleanup that keeps unmerged work** — after a merge, cleanup removes the merged worktrees and their branches. A worktree that still holds files that were not committed or merged is kept, unless you confirm deleting them after seeing the list
+- **Local ignore rules, no commits** — Grove keeps its worktree folders and its `.grove/` state out of `git status` by adding them to `.git/info/exclude`, which git never commits. Creating or deleting a worktree makes no commit and leaves your `.gitignore` and staged files alone
 - **Live dashboard** — WebView panel with two-column session cards, file activity grouped by directory with clickable diffs, and overlap alerts. Agent teams are saved to `.grove/teams.json` and reappear in the sidebar after a restart, marked stopped, without reconnecting their terminals
 - **Worktree management** — create, monitor, sync, diff, and clean up worktrees without leaving your editor. Diff views show full syntax highlighting on both sides
 - **Nested repo support** — works even when your workspace root isn't a git repo. Grove scans the workspace folder's immediate subdirectories, uses the repo it finds, and asks you to choose when there are several. Once Grove has a repo, `Grove: Select Git Repository` switches to a different one or browses for a folder
@@ -53,7 +54,7 @@ code --install-extension ShebinMohanK.grove-pilot
 | `Grove: Launch Agent Team` | Launch a team of parallel agents from a template |
 | `Grove: Open Dashboard` | Open the real-time monitoring dashboard |
 | `Grove: Generate Merge Report` | Analyze all worktrees for merge readiness |
-| `Grove: Execute Merge Sequence` | Guided sequential merge with test gates |
+| `Grove: Execute Merge Sequence` | Guided sequential merge, with tests run between merges |
 | `Grove: Check File Overlaps` | Scan for files modified in multiple worktrees |
 | `Grove: Cleanup Stale Worktrees` | Batch remove worktrees with confirmation |
 | `Grove: Stop All Sessions` | Stop all running Claude Code sessions |
@@ -69,13 +70,30 @@ code --install-extension ShebinMohanK.grove-pilot
 | `grove.autoInstallDependencies` | `true` | Auto-install deps after creating a worktree |
 | `grove.packageManager` | `auto` | Package manager (auto/npm/yarn/pnpm/pip/pipenv/poetry) |
 | `grove.maxConcurrentSessions` | `5` | Maximum concurrent Claude Code sessions |
-| `grove.enableAgentTeams` | `true` | Enable Agent Teams features |
+| `grove.enableAgentTeams` | `true` | On team launch, set `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `~/.claude/settings.json` (see Known issues) |
 | `grove.templateDirectory` | `.grove/templates` | Directory for team templates |
+| `grove.testCommand` | `""` | Test command to run after each merge (auto-detected if empty) |
+| `grove.showTokenEstimates` | `true` | Show the template's token estimate before launching a team |
 | `grove.fileWatcherDebounce` | `500` | Debounce interval (ms) for file change events |
 | `grove.notifyOnSessionComplete` | `true` | Notify when a session completes |
-| `grove.autoGitignore` | `true` | Auto-add worktree paths to .gitignore |
+| `grove.autoGitignore` | `true` | Keep worktree folders out of `git status` through `.git/info/exclude` (nothing is committed) |
 | `grove.showStatusBarItem` | `true` | Show worktree info in the status bar |
 | `grove.protectedBranches` | `["main","master","develop","production"]` | Branches that cannot be deleted |
+
+## What Grove Changes on Your Machine
+
+- **Activation and background fetch.** Grove activates in any workspace that contains a `.git` folder. While it is active it runs `git fetch --all --prune` every 60 seconds (every 30 seconds while sessions are running) so the sync indicators stay current.
+- **Files in your repository.** Worktrees go under `.claude/worktrees/` (`grove.worktreeLocation`). Session, team and agent-instruction files go under `.grove/`. Both are listed in `.git/info/exclude`.
+- **Commits.** Grove commits only in agent worktrees, right before a merge ("Grove: auto-commit agent changes"). The merge sequence checks out the target branch in your main checkout and merges with `git merge --no-edit`.
+- **Dependencies.** After creating a worktree, Grove installs its dependencies (`grove.autoInstallDependencies`, on by default).
+- **Claude Code settings.** See Known issues.
+
+## Known Issues
+
+- **Exact conflict prediction does not work yet.** The `git merge-tree` check before a merge never reports a conflicting file, so the merge report's "Predicted Merge Conflicts" section and the warning before a merge do not appear. What works today is the overlap alert while agents run and the list of files changed on both the base branch and the worktree branch.
+- **Global Claude Code settings.** When a team launches and `grove.enableAgentTeams` is on (the default), Grove writes `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` into your global `~/.claude/settings.json` if it is not already set. Set `grove.enableAgentTeams` to `false` to stop this.
+- **Session status is inferred.** A session shows as active until its terminal closes; Grove cannot yet tell whether Claude is working or waiting for input.
+- **Upgrading from 0.6.0.** Earlier versions committed worktree paths to `.gitignore` and wrote a CLAUDE.md into each agent worktree. The `.gitignore` lines are left in place. A Grove-generated CLAUDE.md that was not committed is restored before the merge; if a branch already committed one, Grove warns before merging it.
 
 ## Documentation
 
@@ -83,7 +101,7 @@ Full reference: [DOCUMENTATION.md](DOCUMENTATION.md)
 
 ## Acknowledgements
 
-Grove automates the [manual parallel sessions with git worktrees](https://code.claude.com/docs/en/common-workflows) workflow documented by Anthropic, wrapping it with a visual interface, overlap detection, and merge intelligence. Built with Claude Code.
+Grove automates the [manual parallel sessions with git worktrees](https://code.claude.com/docs/en/common-workflows) workflow documented by Anthropic, wrapping it with a visual interface, overlap detection, and a guided merge sequence. Built with Claude Code.
 
 ## Feedback & Contributions
 
