@@ -1,8 +1,8 @@
 {
   "name": "grove-pilot",
-  "displayName": "Grove — Worktree Control for Claude Code",
-  "description": "Control plane for parallel AI development — git worktree management, Claude Code session orchestration, and merge intelligence",
-  "version": "0.6.0",
+  "displayName": "Grove — Merge Control for Parallel Claude Code Agents",
+  "description": "See where parallel Claude Code agents overlap while they work, then merge their branches in a guided sequence.",
+  "version": "0.6.1",
   "publisher": "ShebinMohanK",
   "author": {
     "name": "Shebin K Mohan",
@@ -444,7 +444,7 @@
         "grove.enableAgentTeams": {
           "type": "boolean",
           "default": true,
-          "description": "Enable Agent Teams features (sets CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)"
+          "description": "On team launch, set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in the global ~/.claude/settings.json"
         },
         "grove.templateDirectory": {
           "type": "string",
@@ -479,7 +479,7 @@
         "grove.autoGitignore": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically add worktree paths to .gitignore"
+          "description": "Keep worktree folders out of git status by listing them in .git/info/exclude (never committed)"
         },
         "grove.showStatusBarItem": {
           "type": "boolean",

@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.6.1] - 2026-09-25
+
+Data-safety release. It fixes four ways earlier versions could change or lose work in a user's repository without asking, and brings the README and DOCUMENTATION in line with the code.
+
+### Fixed
+- **Creating or deleting a worktree no longer commits anything** — earlier versions ran `git commit` with no pathspec after staging `.gitignore`, so any file the user had already staged was swept into a Grove commit on whatever branch the main checkout had open. Worktree folders and `.grove/` now go in `.git/info/exclude`, which git never commits, and Grove never edits `.gitignore` or the index. `.gitignore` lines written by earlier versions are left in place
+- **A tracked `CLAUDE.md` is never overwritten** — earlier versions wrote each agent's role file over the worktree's `CLAUDE.md`, and the pre-merge auto-commit and merge carried it to the target branch. Agent instructions now live in `.grove/agents/`, outside every worktree, and are passed to Claude Code with `--append-system-prompt` (`--append-system-prompt-file` on Windows). The worktree's own `CLAUDE.md` is untouched. A `CLAUDE.md` that an earlier version generated in a worktree is restored before the auto-commit (its text is kept in `.grove/agents/` so a relaunched agent keeps its instructions), and the merge warns about any branch that already committed one
+- **New files an agent created are no longer lost** — the pre-merge auto-commit used `git add -u`, which skips untracked files, and cleanup then removed the worktree with `--force`, deleting them. The merge now lists every new file in the selected worktrees so you choose which to commit and merge, and an auto-commit failure stops the sequence instead of being ignored. Cleanup removes a worktree only when it is clean, or after you confirm deleting the files listed, and deletes merged branches with `git branch -d`
+- **"I've Resolved — Continue" stages only the conflicted files** — it used to run `git add .` in the main checkout, which could commit stray files and leftover conflict markers. It now warns about files that still contain conflict markers, accepts files you resolved yourself with `git rm`, and if the merge commit fails it leaves the merge in progress instead of aborting it
+- **You can resolve conflicts in the editor** — the conflict prompt was a modal dialog, which blocks the editor. It is now a notification that stays open while you edit. Closing it stops the sequence and leaves the merge in progress; only "Skip This Branch" and "Abort All" run `git merge --abort`
+- **Removing a worktree checks for untracked files itself** — `git worktree remove` without `--force` relies on `git status`, which hides untracked files when `status.showUntrackedFiles=no`, so they could be deleted. "Cleanup Stale Worktrees" now deletes a branch only if it is merged, and a nested git repository an agent created is never committed as a bare gitlink
+- **Undo hint** — after "Abort All" or a test failure, the `git reset --hard <hash>` hint now uses the target branch's commit from before the first merge
+
+### Changed
+- Marketplace name and description now say what the extension does: "Grove — Merge Control for Parallel Claude Code Agents"
+- Confirmations for team cleanup and for force-deleting a worktree now say that branches are deleted too; team cleanup lists worktrees with uncommitted files and branches with commits not merged into the base branch
+- Very large agent instructions (over 96 KiB) are passed with `--append-system-prompt-file`, because Linux limits a single argument to 128 KiB
+- README: documents what Grove changes on your machine (activation on any folder with `.git`, background `git fetch` every 60 s or 30 s with active sessions, the `~/.claude/settings.json` write) and lists known issues
+- `LICENSE`: copyright holder and year corrected
+
+### Known issues
+- The 0.5.0 entry below says the merge report "predicts conflicts ... using `git merge-tree`" and that a merge sequence "shows a modal warning with the conflicting files". That check has never reported a file: it reads git's error message, but `git merge-tree` prints conflicts on stdout. The "Predicted Merge Conflicts" section and the pre-merge warning therefore never appear. The overlap alert while agents run and the "Files Changed on Both Base & Branch" list do work. A fix is in progress
+- When a team launches with `grove.enableAgentTeams` on (the default), Grove still writes `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` into the global `~/.claude/settings.json` if it is missing
+
 ## [0.6.0] - 2026-03-19
 
 ### Added
