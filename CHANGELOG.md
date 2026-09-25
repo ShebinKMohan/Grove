@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Pre-merge conflict prediction works** — the `git merge-tree` check never reported a file: it looked for "CONFLICT" in git's error message, but merge-tree prints its results on stdout, and it compared each branch only with the base branch, so two agents changing the same lines were missed while the base had not moved. Grove now reads merge-tree's output (the exit code and stdout are kept on `GitError`) and merges the branches in memory one after another, in the order the merge sequence will use. The report and the warning before a merge list the conflicting files and the branches they conflict with. Execute Merge Sequence runs the check after its auto-commit, so it sees exactly what will be merged, and merges in the same order
+
 ## [0.6.1] - 2026-09-25
 
 Data-safety release. It fixes four ways earlier versions could change or lose work in a user's repository without asking, and brings the README and DOCUMENTATION in line with the code.

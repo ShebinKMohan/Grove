@@ -720,7 +720,7 @@ For each worktree, computes:
 **Pre-Merge Check Against the Target Branch:**
 For each worktree branch with changes, the merge report compares it with the target branch you pick:
 - "Files Changed on Both Base & Branch" — files changed on both the target branch and the worktree branch since they diverged (a file-overlap heuristic). They may or may not conflict
-- Grove also runs `git merge-tree --write-tree` (Git 2.38+), which is meant to list the files that would conflict. In 0.6.1 this check never reports a file: Grove reads git's error message, but `git merge-tree` prints the conflicts on stdout. The report's "Predicted Merge Conflicts" section and the conflict warning before a merge sequence therefore do not appear yet. A fix is planned
+- "Predicted Merge Conflicts" — Grove merges the branches in memory with `git merge-tree --write-tree --name-only` (Git 2.38+) in the recommended merge order: each branch is merged with the target plus the branches before it that merge cleanly (each clean step is recorded with `git commit-tree` as an unreferenced commit, so no ref, index or file changes). The files git reports as conflicting are listed per branch, with the earlier branches or the target branch that also changed them. This catches two branches that change the same lines even when the target has not moved. A branch predicted to conflict is left out of the steps after it, because its result depends on how the conflict is resolved. Only committed work is checked. With Git older than 2.38, or unrelated histories, only the file-level checks run and the report says so
 
 **Worktree-to-Worktree Overlap Analysis:**
 - Files modified in multiple worktrees identified
@@ -747,7 +747,7 @@ Branches are ordered by the paths of the files each one changed; a branch gets t
 4. Only if a branch already has a committed CLAUDE.md that Grove 0.6.0 generated: warning with "Merge Anyway" (otherwise the merge is cancelled)
 5. Only if the worktrees hold new (untracked) files: a checklist of those files (see Pre-Merge Auto-Commit)
 
-The conflict warning with "Merge Anyway" / "View Report" depends on the `git merge-tree` check above, so it does not appear in 0.6.1.
+6. After the auto-commit, only if the conflict check finds conflicts: a warning listing them, with "Merge Anyway" / "View Report" (anything else cancels; nothing is merged and the worktrees keep their auto-commits)
 
 **Pre-Merge Safety:**
 1. Stops active sessions in worktrees being merged (with confirmation)

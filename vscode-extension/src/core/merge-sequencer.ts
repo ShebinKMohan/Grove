@@ -13,7 +13,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { git, gitWrite, getCurrentBranch } from "../utils/git";
+import { git, gitWrite, getCurrentBranch, GitError } from "../utils/git";
 import {
     getChangedFiles,
     getDiffStats,
@@ -92,13 +92,18 @@ interface FileOverlapInfo {
 }
 
 export interface ConflictPrediction {
-    /** Branch that would conflict with the base branch */
+    /** Branch being predicted */
     branch: string;
-    /** Files predicted to conflict */
+    /**
+     * Files git reports as conflicting when this branch is merged after the
+     * branches before it in the recommended order (empty with "file-overlap")
+     */
     conflictFiles: string[];
+    /** Earlier branches, and the base branch, that also changed those files */
+    conflictsWith: string[];
     /** Files modified on both base and branch (potential conflicts) */
     baseOverlapFiles: string[];
-    /** Whether the prediction was done via merge-tree (exact) or heuristic */
+    /** "merge-tree" when git merged in memory; "file-overlap" if it could not */
     method: "merge-tree" | "file-overlap";
 }
 
@@ -151,95 +156,147 @@ interface MergeStep {
 // Pre-Merge Conflict Prediction
 // ────────────────────────────────────────────
 
-/**
- * Predict merge conflicts between a branch and the base branch
- * WITHOUT modifying the working tree.
- *
- * Strategy:
- * 1. Try `git merge-tree` (Git 2.38+) for exact conflict detection.
- * 2. Fall back to file-overlap heuristic: find files changed on BOTH
- *    the base branch and the worktree branch since they diverged.
- */
-async function predictBranchConflicts(
-    repoRoot: string,
-    branch: string,
-    baseBranch: string
-): Promise<ConflictPrediction> {
-    // Try git merge-tree first (available since Git 2.38)
-    try {
-        // merge-tree --write-tree exits 0 for clean merge, 1 for conflicts
-        await git(
-            ["merge-tree", "--write-tree", "--no-messages", baseBranch, branch],
-            repoRoot
-        );
-        // Exit code 0 = clean merge, no conflicts
-        const baseOverlapFiles = await getBaseOverlapFiles(
-            repoRoot, branch, baseBranch
-        );
-        return {
-            branch,
-            conflictFiles: [],
-            baseOverlapFiles,
-            method: "merge-tree",
-        };
-    } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-
-        // merge-tree exits with code 1 when there ARE conflicts.
-        // The output lists conflicted files. Parse them.
-        if (msg.includes("CONFLICT") || msg.includes("conflict")) {
-            const conflictFiles = parseMergeTreeConflicts(msg);
-            const baseOverlapFiles = await getBaseOverlapFiles(
-                repoRoot, branch, baseBranch
-            );
-            return {
-                branch,
-                conflictFiles,
-                baseOverlapFiles,
-                method: "merge-tree",
-            };
-        }
-
-        // merge-tree command not available (old git) — fall through to heuristic
-    }
-
-    // Fallback: file-overlap heuristic
-    const baseOverlapFiles = await getBaseOverlapFiles(
-        repoRoot, branch, baseBranch
-    );
-
-    return {
-        branch,
-        conflictFiles: [],
-        baseOverlapFiles,
-        method: "file-overlap",
-    };
+/** Result of merging two commits in memory with `git merge-tree`. */
+interface MergeTreeResult {
+    /** Tree of the merged result (with conflict markers where git conflicted). */
+    tree: string;
+    /** Paths git reports as conflicted; empty for a clean merge. */
+    conflictFiles: string[];
 }
 
 /**
- * Parse conflict file paths from `git merge-tree` error output.
+ * Merge two commits in memory with `git merge-tree --write-tree` (Git 2.38+).
+ * The working tree, index and refs are untouched; git only writes objects.
+ * Returns undefined when merge-tree cannot answer (Git older than 2.38,
+ * unrelated histories, a missing branch).
  */
-function parseMergeTreeConflicts(output: string): string[] {
-    const files: string[] = [];
-    for (const line of output.split("\n")) {
-        // "CONFLICT (content): Merge conflict in <file>"
-        const contentMatch = line.match(/Merge conflict in (.+)/);
-        if (contentMatch) {
-            files.push(contentMatch[1].trim());
-            continue;
-        }
-        // "CONFLICT (modify/delete): <file> deleted in ..."
-        const modDeleteMatch = line.match(
-            /CONFLICT \((?:modify\/delete|delete\/modify)\): (.+?) deleted/
+async function mergeTree(
+    repoRoot: string,
+    ours: string,
+    theirs: string
+): Promise<MergeTreeResult | undefined> {
+    let stdout: string;
+    try {
+        stdout = await git(
+            ["merge-tree", "--write-tree", "--name-only", "-z", ours, theirs],
+            repoRoot,
+            { trim: false }
         );
-        if (modDeleteMatch) {
-            files.push(modDeleteMatch[1].trim());
+    } catch (err) {
+        // Exit code 1 means the merge has conflicts; the result is on stdout.
+        if (err instanceof GitError && err.exitCode === 1) {
+            stdout = err.stdout;
+        } else {
+            return undefined;
+        }
+    }
+    // -z output: <tree>\0<conflicted path>\0...\0\0<messages>
+    const fields = stdout.split("\0");
+    const conflictFiles: string[] = [];
+    for (let i = 1; i < fields.length && fields[i] !== ""; i++) {
+        conflictFiles.push(fields[i]);
+    }
+    return { tree: fields[0].trim(), conflictFiles: [...new Set(conflictFiles)] };
+}
+
+/** Files changed on `ref` since it diverged from `base`. */
+async function changedSinceMergeBase(
+    repoRoot: string,
+    base: string,
+    ref: string
+): Promise<Set<string>> {
+    try {
+        const mergeBase = (await git(["merge-base", base, ref], repoRoot)).trim();
+        const raw = await git(["diff", "--name-only", "-z", mergeBase, ref], repoRoot, { trim: false });
+        return new Set(raw.split("\0").filter(Boolean));
+    } catch {
+        return new Set();
+    }
+}
+
+export interface SequencePrediction {
+    branch: string;
+    /** Paths git reports as conflicting for this step; empty if it merges cleanly. */
+    conflictFiles: string[];
+    /** Earlier branches (and the base branch) that also changed those paths. */
+    conflictsWith: string[];
+}
+
+/**
+ * Predict conflicts for merging `branches` into `baseBranch` one after
+ * another, in the given order, without touching the working tree, the
+ * index or any ref.
+ *
+ * Step k merges branch k in memory with the base plus the earlier branches
+ * that merged cleanly (each clean step is recorded with `git commit-tree`,
+ * which writes an unreferenced commit object). This catches two branches
+ * that change the same lines even when the base has not moved. A branch
+ * predicted to conflict is left out of the simulated result, because its
+ * final content depends on how the conflict is resolved.
+ *
+ * Returns undefined when `git merge-tree` cannot answer (Git older than
+ * 2.38, unrelated histories), so callers can fall back to file-level checks.
+ */
+export async function predictMergeSequence(
+    repoRoot: string,
+    branches: string[],
+    baseBranch: string
+): Promise<SequencePrediction[] | undefined> {
+    let current: string;
+    try {
+        current = (await git(["rev-parse", "--verify", `${baseBranch}^{commit}`], repoRoot)).trim();
+    } catch {
+        return undefined;
+    }
+
+    const merged: string[] = [];
+    const predictions: SequencePrediction[] = [];
+    for (const branch of branches) {
+        let tip: string;
+        try {
+            tip = (await git(["rev-parse", "--verify", `${branch}^{commit}`], repoRoot)).trim();
+        } catch {
+            return undefined;
+        }
+
+        const result = await mergeTree(repoRoot, current, tip);
+        if (!result) return undefined;
+
+        if (result.conflictFiles.length === 0) {
+            current = (
+                await git(
+                    [
+                        "-c", "user.name=Grove",
+                        "-c", "user.email=grove@localhost",
+                        "commit-tree", "--no-gpg-sign",
+                        result.tree, "-p", current, "-p", tip,
+                        "-m", "Grove merge prediction",
+                    ],
+                    repoRoot
+                )
+            ).trim();
+            merged.push(branch);
+            predictions.push({ branch, conflictFiles: [], conflictsWith: [] });
             continue;
         }
-        // "CONFLICT (add/add): Merge conflict in <file>"
-        // Already covered by contentMatch above
+
+        // Name who else changed the conflicting files: the base since this
+        // branch diverged, and the earlier branches in the simulated result.
+        const conflicting = new Set(result.conflictFiles);
+        const touches = (files: Set<string>): boolean =>
+            [...conflicting].some((file) => files.has(file));
+        const conflictsWith: string[] = [];
+        if (touches(await changedSinceMergeBase(repoRoot, tip, baseBranch))) {
+            conflictsWith.push(baseBranch);
+        }
+        for (const earlier of merged) {
+            if (touches(await changedSinceMergeBase(repoRoot, baseBranch, earlier))) {
+                conflictsWith.push(earlier);
+            }
+        }
+        predictions.push({ branch, conflictFiles: result.conflictFiles, conflictsWith });
     }
-    return [...new Set(files)];
+    return predictions;
 }
 
 /**
@@ -323,7 +380,11 @@ export async function generateMergeReport(
         }
     }
 
-    // Predict conflicts against the base branch
+    // Compute merge order
+    const mergeOrder = recommendMergeOrder(worktreeInfos, undefined);
+
+    // Predict conflicts along that order: each branch against the base plus
+    // the branches merged before it (see predictMergeSequence).
     const conflictPredictions: ConflictPrediction[] = [];
     if (worktreePaths.length > 0) {
         let repoRoot: string;
@@ -334,31 +395,36 @@ export async function generateMergeReport(
             repoRoot = path.resolve(worktreePaths[0], "..");
         }
 
-        for (const info of worktreeInfos) {
-            if (info.changedFiles.length === 0) continue;
-            try {
-                const prediction = await predictBranchConflicts(
-                    repoRoot,
-                    info.branch,
-                    baseBranch
-                );
-                if (
-                    prediction.conflictFiles.length > 0 ||
-                    prediction.baseOverlapFiles.length > 0
-                ) {
-                    conflictPredictions.push(prediction);
-                }
-            } catch (err) {
-                logError(
-                    `Failed to predict conflicts for ${info.branch}`,
-                    err
-                );
+        const ordered = mergeOrder
+            .map((entry) => worktreeInfos.find((w) => w.branch === entry.branch))
+            .filter((w): w is WorktreeMergeInfo => w !== undefined && w.changedFiles.length > 0);
+
+        let sequence: SequencePrediction[] | undefined;
+        try {
+            sequence = await predictMergeSequence(
+                repoRoot,
+                ordered.map((w) => w.branch),
+                baseBranch
+            );
+        } catch (err) {
+            logError("Failed to predict merge conflicts", err);
+        }
+
+        for (const info of ordered) {
+            const step = sequence?.find((p) => p.branch === info.branch);
+            const baseOverlapFiles = await getBaseOverlapFiles(repoRoot, info.branch, baseBranch);
+            const prediction: ConflictPrediction = {
+                branch: info.branch,
+                conflictFiles: step?.conflictFiles ?? [],
+                conflictsWith: step?.conflictsWith ?? [],
+                baseOverlapFiles,
+                method: sequence ? "merge-tree" : "file-overlap",
+            };
+            if (prediction.conflictFiles.length > 0 || baseOverlapFiles.length > 0) {
+                conflictPredictions.push(prediction);
             }
         }
     }
-
-    // Compute merge order
-    const mergeOrder = recommendMergeOrder(worktreeInfos, undefined);
 
     // Compute totals
     const totalFilesChanged = new Set(
@@ -1073,19 +1139,28 @@ export function formatMergeReportMarkdown(report: MergeReport): string {
         const hasExactConflicts = report.conflictPredictions.some(
             (p) => p.conflictFiles.length > 0
         );
+        if (report.conflictPredictions.some((p) => p.method === "file-overlap")) {
+            lines.push(
+                "_`git merge-tree` could not run (it needs Git 2.38 or later and branches with a shared history), " +
+                "so only the file-level checks below ran._"
+            );
+            lines.push("");
+        }
 
         if (hasExactConflicts) {
             lines.push("## \u26A0\uFE0F Predicted Merge Conflicts");
             lines.push("");
             lines.push(
-                "These branches WILL conflict with `" + report.baseBranch +
-                "` when merged. Resolve these before merging or be prepared to handle conflicts:"
+                "Merging in the recommended order below, `git merge-tree` reports conflicts in these files. " +
+                "Each branch is checked against `" + report.baseBranch + "` plus the branches before it that merge " +
+                "cleanly, so how you resolve an earlier conflict can change later results. Only committed work is checked:"
             );
             lines.push("");
 
             for (const pred of report.conflictPredictions) {
                 if (pred.conflictFiles.length === 0) continue;
-                lines.push(`### \`${pred.branch}\` — ${pred.conflictFiles.length} conflict(s)`);
+                const withWhom = pred.conflictsWith.length > 0 ? ` (with ${pred.conflictsWith.join(", ")})` : "";
+                lines.push(`### \`${pred.branch}\` — ${pred.conflictFiles.length} conflicting file(s)${withWhom}`);
                 lines.push("");
                 for (const file of pred.conflictFiles) {
                     lines.push(`- \u274C \`${file}\``);
@@ -1114,7 +1189,7 @@ export function formatMergeReportMarkdown(report: MergeReport): string {
                 for (const file of pred.baseOverlapFiles) {
                     const isConfirmedConflict = pred.conflictFiles.includes(file);
                     const icon = isConfirmedConflict ? "\u274C" : "\u26A0\uFE0F";
-                    const label = isConfirmedConflict ? "will conflict" : "changed on both sides";
+                    const label = isConfirmedConflict ? "conflicts (git merge-tree)" : "changed on both sides";
                     lines.push(`- ${icon} \`${file}\` — ${label}`);
                 }
                 lines.push("");

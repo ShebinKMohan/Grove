@@ -72,12 +72,15 @@ export async function git(
         });
         return options.trim === false ? stdout : stdout.trim();
     } catch (err) {
-        const error = err as { stderr?: string; message?: string };
+        const error = err as { stderr?: string; stdout?: string; code?: unknown; message?: string };
         let message = error.stderr?.trim() || error.message || String(err);
         // Strip "fatal: " and "error: " prefixes that git adds — they're
         // unhelpful noise when the message is embedded in our own UI.
         message = message.replace(/^(fatal|error): /i, "");
-        throw new GitError(message, args);
+        throw new GitError(message, args, {
+            exitCode: typeof error.code === "number" ? error.code : undefined,
+            stdout: error.stdout ?? "",
+        });
     }
 }
 
@@ -174,10 +177,20 @@ export async function listLocalBranches(cwd: string): Promise<string[]> {
  */
 export class GitError extends Error {
     public readonly args: string[];
+    /** Exit code of the git process, when it ran and exited. */
+    public readonly exitCode?: number;
+    /** Standard output. Some commands (merge-tree) report results here on failure. */
+    public readonly stdout: string;
 
-    constructor(message: string, args: string[]) {
+    constructor(
+        message: string,
+        args: string[],
+        details: { exitCode?: number; stdout?: string } = {}
+    ) {
         super(message);
         this.name = "GitError";
         this.args = args;
+        this.exitCode = details.exitCode;
+        this.stdout = details.stdout ?? "";
     }
 }
