@@ -33,6 +33,7 @@ import {
     fetchRemote,
     syncWorktree,
     listUncommittedChanges,
+    listWorktrees,
 } from "./core/worktree-manager";
 import {
     agentInstructionsPath,
@@ -55,6 +56,7 @@ import {
     findConflictMarkers,
     isNestedRepo,
     listUnmergedFiles,
+    isMergeInProgress,
     stageResolvedConflicts,
 } from "./core/merge-sequencer";
 import { formatErrorForUser } from "./utils/errors";
@@ -923,6 +925,7 @@ async function activateWithRepo(
                     async (progress) => {
                         let removed = 0;
                         const failed: string[] = [];
+                        const keptBranches: string[] = [];
                         for (const wt of toRemove) {
                             progress.report({
                                 message: `Removing ${wt.branch}...`,
@@ -938,7 +941,7 @@ async function activateWithRepo(
                                     sessionTracker.stopSession(session.id);
                                 }
 
-                                await removeWorktree(repoRoot, wt.path, {
+                                const outcome = await removeWorktree(repoRoot, wt.path, {
                                     deleteBranch: deleteBranches,
                                     force,
                                     // Force covers uncommitted files only; a branch
@@ -946,6 +949,7 @@ async function activateWithRepo(
                                     forceDeleteBranch: false,
                                     protectedBranches: getProtectedBranches(),
                                 });
+                                if (outcome.branchDeleted === "failed") keptBranches.push(wt.branch);
 
                                 removed++;
                             } catch (err) {
@@ -955,6 +959,13 @@ async function activateWithRepo(
                                 );
                                 failed.push(wt.branch);
                             }
+                        }
+                        if (keptBranches.length > 0) {
+                            void showAutoWarning(
+                                `Kept branch(es) with commits that are not merged: ${keptBranches.join(", ")}. ` +
+                                `Delete them with 'git branch -D' if you meant to.`,
+                                15_000
+                            );
                         }
                         if (failed.length > 0) {
                             void showAutoWarning(
@@ -1600,29 +1611,41 @@ async function activateWithRepo(
                 const defaultBase = vscode.workspace
                     .getConfiguration("grove")
                     .get<string>("defaultBaseBranch", "main");
+                // The branch each worktree has checked out is the one removal deletes.
+                const checkedOut = new Map<string, string>();
+                try {
+                    for (const wt of await listWorktrees(repoRoot)) {
+                        checkedOut.set(path.resolve(wt.path), wt.branch);
+                    }
+                } catch {
+                    // Fall back to the branch recorded for the agent
+                }
                 const atRisk: string[] = [];
                 for (const agent of orchestrator.getTeam(teamId)?.agents ?? []) {
-                    if (!agent.worktreePath || !fs.existsSync(agent.worktreePath)) continue;
+                    if (!agent.worktreePath) continue;
+                    const branch = checkedOut.get(path.resolve(agent.worktreePath)) ?? agent.branch;
                     const parts: string[] = [];
-                    try {
-                        const changes = await listUncommittedChanges(agent.worktreePath);
-                        const count = changes.tracked.length + changes.untracked.length;
-                        if (count > 0) parts.push(`${count} uncommitted file(s)`);
-                    } catch {
-                        parts.push("status unknown");
+                    if (fs.existsSync(agent.worktreePath)) {
+                        try {
+                            const changes = await listUncommittedChanges(agent.worktreePath);
+                            const count = changes.tracked.length + changes.untracked.length;
+                            if (count > 0) parts.push(`${count} uncommitted file(s)`);
+                        } catch {
+                            parts.push("status unknown");
+                        }
                     }
-                    if (agent.branch) {
+                    if (branch && !branch.startsWith("(")) {
                         try {
                             const ahead = Number(await git(
-                                ["rev-list", "--count", `refs/heads/${defaultBase}..refs/heads/${agent.branch}`],
+                                ["rev-list", "--count", `refs/heads/${defaultBase}..refs/heads/${branch}`],
                                 repoRoot
                             ));
                             if (ahead > 0) parts.push(`${ahead} commit(s) not merged into ${defaultBase}`);
                         } catch {
-                            // Base or branch missing; nothing to compare
+                            parts.push(`commits not merged into ${defaultBase}: unknown`);
                         }
                     }
-                    if (parts.length > 0) atRisk.push(`${agent.branch}: ${parts.join(", ")}`);
+                    if (parts.length > 0) atRisk.push(`${branch}: ${parts.join(", ")}`);
                 }
 
                 const confirm = await vscode.window.showWarningMessage(
@@ -1849,10 +1872,18 @@ async function activateWithRepo(
     );
 
     // Execute Merge Sequence
+    // A sequence can wait on the user for a long time (conflicts); a second
+    // one started meanwhile would act on the first one's merge.
+    let mergeSequenceRunning = false;
     context.subscriptions.push(
         vscode.commands.registerCommand(
             "grove.executeMergeSequence",
             async () => {
+                if (mergeSequenceRunning) {
+                    void showAutoWarning("A merge sequence is already running. Finish or stop it first.");
+                    return;
+                }
+                mergeSequenceRunning = true;
                 try {
                     const worktrees = await listAllWorktrees(repoRoot);
                     const nonMain = worktrees.filter((wt) => !wt.isMain);
@@ -1975,14 +2006,18 @@ async function activateWithRepo(
                         baseBranch
                     );
                     if (generatedClaudeMd.branches.length > 0) {
+                        const listed = generatedClaudeMd.branches
+                            .map((b) => `${b.branch} (${b.file})`)
+                            .join("\n");
+                        const files = [...new Set(generatedClaudeMd.branches.map((b) => b.file))].join(" ");
                         const effect = generatedClaudeMd.baseHasClaudeMd
                             ? `Merging them replaces the project's CLAUDE.md on ${baseBranch}. To keep it, cancel, ` +
-                              `run 'git checkout ${baseBranch} -- CLAUDE.md' in each of these worktrees, commit, and merge again.`
+                              `run 'git checkout ${baseBranch} -- ${files}' in each of these worktrees, commit, and merge again.`
                             : `${baseBranch} has no CLAUDE.md, so merging them adds Grove's agent file there as the project's CLAUDE.md. ` +
-                              `To avoid that, cancel, run 'git rm CLAUDE.md' in each of these worktrees, commit, and merge again.`;
+                              `To avoid that, cancel, run 'git rm ${files}' in each of these worktrees, commit, and merge again.`;
                         const choice = await vscode.window.showWarningMessage(
-                            `These branches carry a CLAUDE.md that an earlier version of Grove generated and committed:\n\n` +
-                            `${generatedClaudeMd.branches.join("\n")}\n\n${effect}`,
+                            `These branches carry a CLAUDE.md that an earlier version of Grove generated and committed ` +
+                            `(the file that holds it is in brackets):\n\n${listed}\n\n${effect}`,
                             { modal: true },
                             "Merge Anyway"
                         );
@@ -2107,6 +2142,23 @@ async function activateWithRepo(
                     const mergedBranches: string[] = [];
                     const results: Array<{ branch: string; status: string; message: string }> = [];
 
+                    // Abort the current merge; if git refuses (for example a file that
+                    // merged cleanly was edited meanwhile), say so and return false.
+                    const abortOrExplain = async (branch: string): Promise<boolean> => {
+                        try {
+                            await abortMerge(repoRoot);
+                            return true;
+                        } catch (err) {
+                            await vscode.window.showWarningMessage(
+                                `Could not abort the merge of ${branch}: ${err instanceof Error ? err.message : String(err)}\n\n` +
+                                `The merge is still in progress. Finish it with 'git commit', or undo it yourself with ` +
+                                `'git merge --abort' after saving or discarding your edits. The merge sequence has stopped.`,
+                                { modal: true }
+                            );
+                            return false;
+                        }
+                    };
+
                     // ── Execute merges ──
                     await vscode.window.withProgress(
                         {
@@ -2121,6 +2173,17 @@ async function activateWithRepo(
                                     message: `${i + 1}/${total}: ${branch} \u2192 ${baseBranch}`,
                                     increment: (1 / total) * 100,
                                 });
+
+                                // Never start a merge on top of one that is still in progress.
+                                if (await isMergeInProgress(repoRoot)) {
+                                    results.push({ branch, status: "error", message: "A merge is still in progress" });
+                                    await vscode.window.showWarningMessage(
+                                        `The merge sequence has stopped before ${branch}: a merge is still in progress in ` +
+                                        `${repoRoot}. Finish it with 'git commit' or undo it with 'git merge --abort'.`,
+                                        { modal: true }
+                                    );
+                                    break;
+                                }
 
                                 const step = await executeMergeStep(repoRoot, branch, baseBranch);
 
@@ -2141,8 +2204,9 @@ async function activateWithRepo(
                                     let action: string | undefined;
                                     for (;;) {
                                         // Not modal: a modal dialog blocks the editor, and the
-                                        // user has to edit the files before continuing.
-                                        action = await vscode.window.showWarningMessage(
+                                        // user has to edit the files before continuing. An error
+                                        // notification with buttons stays on screen until answered.
+                                        action = await vscode.window.showErrorMessage(
                                             `Conflict in ${branch}: ${step.conflictFiles?.join(", ") ?? "unknown files"}. ` +
                                             `Resolve the conflicts in the editor and save, then choose Continue.`,
                                             "I've Resolved \u2014 Continue",
@@ -2197,7 +2261,10 @@ async function activateWithRepo(
                                             }
                                         }
                                     } else if (action === "Abort All") {
-                                        try { await abortMerge(repoRoot); } catch { /* */ }
+                                        if (!(await abortOrExplain(branch))) {
+                                            results.push({ branch, status: "error", message: "Could not abort the merge" });
+                                            break;
+                                        }
                                         results.push({ branch, status: "aborted", message: "Aborted" });
                                         void showAutoInfo(
                                             `Merge aborted. To undo previous merges: git reset --hard ${preMergeHash}`,
@@ -2205,7 +2272,10 @@ async function activateWithRepo(
                                         );
                                         break;
                                     } else if (action === "Skip This Branch") {
-                                        try { await abortMerge(repoRoot); } catch { /* */ }
+                                        if (!(await abortOrExplain(branch))) {
+                                            results.push({ branch, status: "error", message: "Could not abort the merge" });
+                                            break;
+                                        }
                                         results.push({ branch, status: "skipped", message: "Skipped (conflict)" });
                                         continue;
                                     } else {
@@ -2333,6 +2403,8 @@ async function activateWithRepo(
                     void showAutoError(
                         formatErrorForUser(err, "Merge sequence failed")
                     );
+                } finally {
+                    mergeSequenceRunning = false;
                 }
             }
         )

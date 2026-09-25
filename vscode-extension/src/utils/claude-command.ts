@@ -30,13 +30,14 @@ export function quotePowerShell(value: string): string {
 
 /**
  * Pick the claude binary from `which claude` / `where claude` output.
- * `where` prints CRLF-separated lines and can list several matches (an npm
- * shim next to claude.cmd or claude.exe); prefer a Windows executable.
+ * `where` prints CRLF-separated lines and can list several matches. On
+ * Windows a native claude.exe is preferred; a .cmd shim is not, because
+ * cmd.exe would re-parse the arguments (splitting at `&`, expanding `%`).
  */
 export function firstCommandPath(output: string, platform: NodeJS.Platform = process.platform): string | undefined {
     const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (platform === "win32") {
-        const executable = lines.find((line) => /\.(exe|cmd|bat)$/i.test(line));
+        const executable = lines.find((line) => /\.exe$/i.test(line));
         if (executable) return executable;
     }
     return lines[0];

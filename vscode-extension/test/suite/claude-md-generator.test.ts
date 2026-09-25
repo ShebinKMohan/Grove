@@ -326,7 +326,42 @@ describe("claude-md-generator", () => {
             assert.strictEqual(fs.readFileSync(current, "utf-8"), before);
         });
 
-        it("discardLegacyGeneratedClaudeMd removes an untracked generated CLAUDE.md", async () => {
+        it("discardLegacyGeneratedClaudeMd deletes a generated CLAUDE.md that was never staged", async () => {
+            repo.git("rm", "-q", "CLAUDE.md");
+            repo.commit("no CLAUDE.md");
+            const wt = await makeWorktree("feat-a");
+            fs.writeFileSync(path.join(wt, "CLAUDE.md"), buildAgentInstructions(optionsFor(wt)));
+            assert.strictEqual(gitIn(wt, "status", "--porcelain"), "?? CLAUDE.md");
+
+            assert.strictEqual(await discardLegacyGeneratedClaudeMd(wt), true);
+            assert.strictEqual(fs.existsSync(path.join(wt, "CLAUDE.md")), false);
+            assert.strictEqual(gitIn(wt, "status", "--porcelain"), "");
+        });
+
+        it("discardLegacyGeneratedClaudeMd handles a staged copy that differs from the file", async () => {
+            repo.git("rm", "-q", "CLAUDE.md");
+            repo.commit("no CLAUDE.md");
+            const wt = await makeWorktree("feat-a");
+            const generated = buildAgentInstructions(optionsFor(wt));
+            fs.writeFileSync(path.join(wt, "CLAUDE.md"), generated);
+            gitIn(wt, "add", "CLAUDE.md");
+            fs.writeFileSync(path.join(wt, "CLAUDE.md"), generated + "\nmore\n");
+
+            assert.strictEqual(await discardLegacyGeneratedClaudeMd(wt), true);
+            assert.strictEqual(gitIn(wt, "status", "--porcelain"), "");
+        });
+
+        it("discardLegacyGeneratedClaudeMd saves nothing when HEAD's CLAUDE.md is already generated", async () => {
+            const wt = await makeWorktree("feat-a");
+            const generated = buildAgentInstructions(optionsFor(wt));
+            fs.writeFileSync(path.join(wt, "CLAUDE.md"), generated);
+            gitIn(wt, "commit", "-q", "-am", "inherited role file");
+
+            assert.strictEqual(await discardLegacyGeneratedClaudeMd(wt), false);
+            assert.strictEqual(fs.existsSync(agentInstructionsPath(repo.root, wt)), false);
+        });
+
+        it("discardLegacyGeneratedClaudeMd removes a staged generated CLAUDE.md", async () => {
             repo.git("rm", "-q", "CLAUDE.md");
             repo.commit("no CLAUDE.md");
             const wt = await makeWorktree("feat-a");

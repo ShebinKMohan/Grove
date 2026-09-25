@@ -763,13 +763,13 @@ Before the first merge, Grove commits the work in each selected worktree:
 3. If a commit fails (for example, a pre-commit hook rejects it), the sequence stops before any merge and shows the error
 
 **Merge Execution:**
-For each worktree in sorted order:
+Only one merge sequence runs at a time. For each worktree in sorted order (the sequence stops first if a merge is still in progress in the main checkout):
 1. Checkout target branch (in the main checkout)
 2. Merge the worktree's branch (`git merge <branch> --no-edit`)
 3. If conflict: opens up to 5 of the conflicting files with VS Code's inline conflict markers (CodeLens: Accept Current / Incoming / Both)
-4. A notification (not a modal dialog, so you can edit the files while it is open) offers "I've Resolved — Continue" / "Skip This Branch" / "Abort All". Closing it without a choice stops the sequence and leaves the merge in progress, undoing nothing
+4. A notification that stays on screen (not a modal dialog, so you can edit the files while it is open) offers "I've Resolved — Continue" / "Skip This Branch" / "Abort All". Closing it without a choice stops the sequence and leaves the merge in progress, undoing nothing
    - "I've Resolved — Continue" first checks the conflicted files for leftover `<<<<<<<` / `>>>>>>>` markers and asks before committing them. It then stages only the conflicted files that are still unmerged (nothing else in the checkout; a file you already resolved with `git rm` or staged yourself is left as it is) and commits the merge. If that commit fails and the merge is still in progress, Grove does not abort it: the merge stays in progress, Grove says which files are still unmerged, tells you to finish it with `git commit` or undo it with `git merge --abort`, and the sequence stops
-   - "Skip This Branch" runs `git merge --abort` for this branch and moves on to the next one
+   - "Skip This Branch" runs `git merge --abort` for this branch and moves on to the next one. If git cannot abort (for example because a file that merged cleanly was edited meanwhile), Grove says so and stops, leaving the merge in progress; the same applies to "Abort All"
    - "Abort All" runs `git merge --abort` for this branch and stops the sequence (see Abort Semantics)
 5. If the merge fails for any other reason: runs `git merge --abort`, shows a warning, and moves on to the next branch
 6. After a clean or resolved merge: runs tests when `grove.testCommand` is set or a test command is detected (no dialog unless they fail). On failure you choose "Continue Anyway" or "Abort"; stopping does not undo the merge that was just made, and Grove shows the `git reset --hard <hash>` command

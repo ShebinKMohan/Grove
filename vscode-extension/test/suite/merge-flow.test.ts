@@ -17,6 +17,7 @@ import {
     executeMergeStep,
     findBranchesWithGeneratedClaudeMd,
     findConflictMarkers,
+    isMergeInProgress,
     listUnmergedFiles,
     postMergeCleanup,
     stageResolvedConflicts,
@@ -150,7 +151,7 @@ describe("merge flow (real git)", () => {
 
         assert.deepStrictEqual(
             await findBranchesWithGeneratedClaudeMd(repo.root, ["legacy", "clean"], "main"),
-            { branches: ["legacy"], baseHasClaudeMd: true }
+            { branches: [{ branch: "legacy", file: "CLAUDE.md" }], baseHasClaudeMd: true }
         );
     });
 
@@ -174,7 +175,7 @@ describe("merge flow (real git)", () => {
 
         assert.deepStrictEqual(
             await findBranchesWithGeneratedClaudeMd(repo.root, ["legacy"], "main"),
-            { branches: ["legacy"], baseHasClaudeMd: false }
+            { branches: [{ branch: "legacy", file: "CLAUDE.md" }], baseHasClaudeMd: false }
         );
     });
 
@@ -199,7 +200,7 @@ describe("merge flow (real git)", () => {
 
         assert.deepStrictEqual(
             await findBranchesWithGeneratedClaudeMd(repo.root, ["linked"], "main"),
-            { branches: ["linked"], baseHasClaudeMd: true }
+            { branches: [{ branch: "linked", file: "AGENTS.md" }], baseHasClaudeMd: true }
         );
     });
 
@@ -299,6 +300,23 @@ describe("merge flow (real git)", () => {
             assert.deepStrictEqual(await stageResolvedConflicts(repo.root, step.conflictFiles ?? []), []);
             repo.git("commit", "--no-edit", "-q");
             assert.throws(() => repo.git("show", "main:src/app.ts"));
+        });
+
+        it("stages what is on disk even if the user staged an earlier resolution", async () => {
+            await conflictingBranches();
+            await executeMergeStep(repo.root, "agent-a", "main");
+            const step = await executeMergeStep(repo.root, "agent-b", "main");
+            assert.strictEqual(step.status, "conflict");
+            assert.strictEqual(await isMergeInProgress(repo.root), true);
+
+            repo.write("src/app.ts", "export const app = 'first try';\n");
+            repo.git("add", "src/app.ts");
+            repo.write("src/app.ts", "export const app = 'final';\n");
+
+            assert.deepStrictEqual(await stageResolvedConflicts(repo.root, ["src/app.ts"]), []);
+            repo.git("commit", "--no-edit", "-q");
+            assert.strictEqual(repo.git("show", "main:src/app.ts"), "export const app = 'final';");
+            assert.strictEqual(await isMergeInProgress(repo.root), false);
         });
 
         it("listUnmergedFiles is empty outside a merge", async () => {

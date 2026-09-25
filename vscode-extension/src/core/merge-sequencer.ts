@@ -541,10 +541,10 @@ export async function findBranchesWithGeneratedClaudeMd(
     repoRoot: string,
     branches: string[],
     baseBranch: string
-): Promise<{ branches: string[]; baseHasClaudeMd: boolean }> {
+): Promise<{ branches: Array<{ branch: string; file: string }>; baseHasClaudeMd: boolean }> {
     // Read the root CLAUDE.md at a ref, matching its name without case and
     // following a symlink (for example CLAUDE.md -> AGENTS.md).
-    const readAt = async (ref: string): Promise<string | undefined> => {
+    const readAt = async (ref: string): Promise<{ file: string; content: string } | undefined> => {
         try {
             const entries = (await git(["ls-tree", "-z", ref], repoRoot, { trim: false }))
                 .split("\0")
@@ -560,7 +560,7 @@ export async function findBranchesWithGeneratedClaudeMd(
                 name = path.posix.normalize(await git(["show", `${ref}:${entry.name}`], repoRoot));
                 if (name.startsWith("../") || name.startsWith("/")) return undefined;
             }
-            return await git(["show", `${ref}:${name}`], repoRoot);
+            return { file: name, content: await git(["show", `${ref}:${name}`], repoRoot) };
         } catch {
             return undefined;
         }
@@ -568,15 +568,15 @@ export async function findBranchesWithGeneratedClaudeMd(
 
     const base = await readAt(baseBranch);
     const baseHasClaudeMd = base !== undefined;
-    if (base !== undefined && isGroveGeneratedInstructions(base)) {
+    if (base !== undefined && isGroveGeneratedInstructions(base.content)) {
         return { branches: [], baseHasClaudeMd };
     }
 
-    const found: string[] = [];
+    const found: Array<{ branch: string; file: string }> = [];
     for (const branch of branches) {
-        const content = await readAt(branch);
-        if (content !== undefined && isGroveGeneratedInstructions(content)) {
-            found.push(branch);
+        const entry = await readAt(branch);
+        if (entry !== undefined && isGroveGeneratedInstructions(entry.content)) {
+            found.push({ branch, file: entry.file });
         }
     }
     return { branches: found, baseHasClaudeMd };
@@ -627,7 +627,12 @@ export async function stageResolvedConflicts(
     conflictFiles: string[]
 ): Promise<string[]> {
     const pending = new Set(await listUnmergedFiles(repoRoot));
-    await stagePaths(repoRoot, conflictFiles.filter((file) => pending.has(file)));
+    // Stage what is on disk now (even if the user staged an earlier version);
+    // skip a path that is gone and already resolved, e.g. with `git rm`.
+    const toStage = conflictFiles.filter(
+        (file) => pending.has(file) || fs.existsSync(path.join(repoRoot, file))
+    );
+    await stagePaths(repoRoot, toStage);
     return listUnmergedFiles(repoRoot);
 }
 
@@ -664,6 +669,18 @@ export async function checkRepoState(repoRoot: string): Promise<{ clean: boolean
         // If we can't check, assume clean and let git fail naturally
     }
     return { clean: true };
+}
+
+/**
+ * True while a merge is in progress in the given checkout (MERGE_HEAD exists).
+ */
+export async function isMergeInProgress(repoRoot: string): Promise<boolean> {
+    try {
+        await git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], repoRoot);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 /**

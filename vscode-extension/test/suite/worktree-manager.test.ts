@@ -318,6 +318,24 @@ describe("worktree-manager: create/remove never commit or touch the index", () =
         assert.strictEqual((await getWorktreeStatus(result.path)).untracked, 1);
     });
 
+    it("listUncommittedChanges counts a staged change even when the file matches HEAD again", async () => {
+        const result = await createWorktree(repo.root, "feat-x", { autoGitignore: true });
+        fs.writeFileSync(path.join(result.path, "README.md"), "staged\n");
+        gitIn(result.path, "add", "README.md");
+        fs.writeFileSync(path.join(result.path, "README.md"), "# Test\n");
+
+        assert.deepStrictEqual((await listUncommittedChanges(result.path)).tracked, ["README.md"]);
+    });
+
+    it("removeWorktree removes a clean worktree with no commits yet", async () => {
+        const wt = path.join(repo.root, ".claude", "worktrees", "orphan");
+        repo.git("worktree", "add", "-q", "--orphan", "-b", "orphan", wt);
+        assert.deepStrictEqual(await listUncommittedChanges(wt), { tracked: [], untracked: [] });
+
+        await removeWorktree(repo.root, wt, {});
+        assert.strictEqual(fs.existsSync(wt), false);
+    });
+
     it("listUncommittedChanges reports tracked changes and each untracked file", async () => {
         const result = await createWorktree(repo.root, "feat-x", { autoGitignore: true });
         const wt = result.path;

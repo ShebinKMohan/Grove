@@ -522,15 +522,24 @@ export async function listUncommittedChanges(
     worktreePath: string
 ): Promise<UncommittedChanges> {
     const splitNul = (raw: string): string[] => raw.split("\0").filter(Boolean);
-    const [trackedRaw, untrackedRaw] = await Promise.all([
-        git(["diff", "--name-only", "-z", "HEAD"], worktreePath, { trim: false }),
-        git(
-            ["ls-files", "--others", "--exclude-standard", "-z"],
-            worktreePath,
-            { trim: false }
-        ),
+    const run = (args: string[]): Promise<string[]> =>
+        git(args, worktreePath, { trim: false }).then(splitNul);
+
+    let hasHead = true;
+    try {
+        await git(["rev-parse", "--verify", "--quiet", "HEAD"], worktreePath);
+    } catch {
+        hasHead = false;
+    }
+
+    const [vsHead, staged, untracked] = await Promise.all([
+        // Without a first commit, everything in the index is uncommitted.
+        hasHead ? run(["diff", "--name-only", "-z", "HEAD"]) : run(["ls-files", "-z"]),
+        // Staged changes can differ from HEAD even when the file matches it.
+        hasHead ? run(["diff", "--cached", "--name-only", "-z"]) : Promise.resolve([]),
+        run(["ls-files", "--others", "--exclude-standard", "-z"]),
     ]);
-    return { tracked: splitNul(trackedRaw), untracked: splitNul(untrackedRaw) };
+    return { tracked: [...new Set([...vsHead, ...staged])], untracked };
 }
 
 /**

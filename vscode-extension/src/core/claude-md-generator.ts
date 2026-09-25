@@ -116,17 +116,22 @@ export async function discardLegacyGeneratedClaudeMd(worktreePath: string): Prom
     }
     if (!isGroveGeneratedInstructions(content)) return false;
 
-    // This was the agent's only copy of its instructions: keep it where
-    // 0.6.1 looks for them, so a relaunch still gets its role and task.
-    await migrateLegacyInstructions(worktreePath, content);
-
     const rel = path.relative(fs.realpathSync.native(worktreePath), target).replace(/\\/g, "/");
     if (!rel || rel.startsWith("../") || path.isAbsolute(rel)) return false;
 
-    const indexed = (
+    // The index entry for the file Grove wrote. On a case-insensitive disk it
+    // may differ in case (claude.md); accept such an entry only if it is the
+    // same file on disk, so a separate claude.md is never touched.
+    const candidates = (
         await git(["ls-files", "-z", "--", `:(icase)${rel}`], worktreePath, { trim: false })
     ).split("\0").filter((name) => name.toLowerCase() === rel.toLowerCase());
-    const tracked = indexed[0];
+    const tracked = candidates.find((name) => name === rel) ?? candidates.find((name) => {
+        try {
+            return fs.realpathSync.native(path.join(worktreePath, name)) === target;
+        } catch {
+            return false;
+        }
+    });
 
     let headContent: string | undefined;
     if (tracked) {
@@ -137,13 +142,21 @@ export async function discardLegacyGeneratedClaudeMd(worktreePath: string): Prom
         }
     }
 
+    if (tracked && headContent !== undefined && isGroveGeneratedInstructions(headContent)) {
+        return false;
+    }
+
+    // This was the agent's only copy of its instructions: keep it where
+    // 0.6.1 looks for them, so a relaunch still gets its role and task.
+    await migrateLegacyInstructions(worktreePath, content);
+
     if (tracked && headContent !== undefined) {
-        if (isGroveGeneratedInstructions(headContent)) return false;
         await gitWrite(["checkout", "HEAD", "--", tracked], worktreePath);
     } else {
-        // Unstage it first in case it was added to the index.
+        // Unstage it first in case it was added to the index (--force: the
+        // staged copy may differ from both the file and HEAD).
         if (tracked) {
-            await gitWrite(["rm", "--cached", "--quiet", "--", tracked], worktreePath);
+            await gitWrite(["rm", "--cached", "--quiet", "--force", "--", tracked], worktreePath);
         }
         fs.rmSync(target, { force: true });
     }

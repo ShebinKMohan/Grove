@@ -103,6 +103,18 @@ describe("claude-command", () => {
 
                     // $(...) drops trailing newlines; nothing else changes.
                     assert.deepStrictEqual(args, ["--continue", "--append-system-prompt", text.replace(/\n+$/, "")]);
+
+                    // Large-file mode: the path arrives as one argument.
+                    const fileCmd = buildPosixClaudeCommand({
+                        claudePath: stub,
+                        appendSystemPromptFile: file,
+                        readFileInClaude: true,
+                    });
+                    const fileOut = execFileSync(shell, [...flags, `exec ${fileCmd}`], {
+                        encoding: "utf-8",
+                        env: { PATH: "/usr/bin:/bin", HOME: base },
+                    });
+                    assert.deepStrictEqual(fileOut.split("\0").slice(0, -1), ["--append-system-prompt-file", file]);
                 } finally {
                     fs.rmSync(base, { recursive: true, force: true });
                 }
@@ -111,10 +123,11 @@ describe("claude-command", () => {
     });
 
     describe("firstCommandPath()", () => {
-        it("strips the CR from `where` output and prefers a Windows executable", () => {
-            const out = "C:\\Users\\me\\AppData\\Roaming\\npm\\claude\r\nC:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd\r\n";
-            assert.strictEqual(firstCommandPath(out, "win32"), "C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd");
-            assert.strictEqual(firstCommandPath("C:\\bin\\claude.exe\r\n", "win32"), "C:\\bin\\claude.exe");
+        it("strips the CR from `where` output and prefers claude.exe, not a .cmd shim", () => {
+            const npm = "C:\\Users\\me\\AppData\\Roaming\\npm\\claude\r\nC:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd\r\n";
+            assert.strictEqual(firstCommandPath(npm, "win32"), "C:\\Users\\me\\AppData\\Roaming\\npm\\claude");
+            const both = "C:\\npm\\claude.cmd\r\nC:\\Users\\me\\.local\\bin\\claude.exe\r\n";
+            assert.strictEqual(firstCommandPath(both, "win32"), "C:\\Users\\me\\.local\\bin\\claude.exe");
         });
 
         it("takes the first line of `which` output", () => {
